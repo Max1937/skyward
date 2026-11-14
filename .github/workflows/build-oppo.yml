@@ -270,6 +270,20 @@ jobs:
         env:
           RECOVERY: ${{ steps.stock.outputs.recovery }}
         run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
+      # The 20 MB UI typeface lives in the sibling fork of the same network;
+      # it is the one file the local restore could not carry. Fetch it on the
+      # runner (GitHub-internal) so the packer finds it.
+      - name: Fetch the UI typeface
+        run: |
+          set -euo pipefail
+          mkdir -p resources/fonts
+          if [ ! -s resources/fonts/MiSansVF.ttf ]; then
+            curl -fsSL --retry 5 --retry-delay 3 \
+              -o resources/fonts/MiSansVF.ttf \
+              https://raw.githubusercontent.com/Max1937/skyward-a57/main/resources/fonts/MiSansVF.ttf
+          fi
+          test -s resources/fonts/MiSansVF.ttf
+          sha256sum resources/fonts/MiSansVF.ttf
       - name: Pack the recovery
         id: pack
         env:
