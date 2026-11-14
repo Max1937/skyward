@@ -88,8 +88,11 @@ impl KeyService for keymaster::Keymaster<'_> {
     }
 
     fn described(&self) -> anyhow::Result<String> {
-        let f = self.features()?;
-        Ok(format!("keymaster 3.0, version {}, security level {}, {} kinds of key", f.version, f.security_level, f.algorithms.len()))
+        // A diagnostic string only. The corrected keymaster@3.0 interface
+        // exposes no getHardwareFeatures call here, and probing the service
+        // with a possibly misnumbered method is how deleteAllKeys was nearly
+        // reached. Say what it is without sending any transaction.
+        Ok("keymaster 3.0 (OPPO A57 / R9s)".to_string())
     }
 }
 
