@@ -152,6 +152,24 @@ jobs:
           ref: ${{ steps.pick.outputs.ref }}
           path: kernel
           fetch-depth: 1
+      - uses: actions/checkout@v7
+        with:
+          path: skyward
+          fetch-depth: 1
+      # The fragments live here so that a recovery need (a driver the
+      # phone's own kernel left out, say the prima WLAN one) takes effect
+      # without a push to the kernel tree: anything carried here overrides
+      # the tree's own fragment of the same name.
+      - name: Take the recovery's config fragments from this repository
+        run: |
+          set -euo pipefail
+          for frag in ${FRAGMENTS}; do
+            if test -f "skyward/kernel/${frag#vendor/}"; then
+              mkdir -p "kernel/arch/arm64/configs/$(dirname "${frag}")"
+              cp "skyward/kernel/${frag#vendor/}" "kernel/arch/arm64/configs/${frag}"
+              echo "overrode arch/arm64/configs/${frag} with the recovery's"
+            fi
+          done
       - name: Install the build's dependencies
         run: |
           set -euo pipefail
