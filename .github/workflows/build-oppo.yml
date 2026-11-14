@@ -161,9 +161,11 @@ jobs:
       # without a push to the kernel tree: anything carried here overrides
       # the tree's own fragment of the same name.
       - name: Take the recovery's config fragments from this repository
+        env:
+          FRAGMENTS: ${{ steps.pick.outputs.fragments }}
         run: |
           set -euo pipefail
-          for frag in ${FRAGMENTS}; do
+          for frag in ${FRAGMENTS:-}; do
             if test -f "skyward/kernel/${frag#vendor/}"; then
               mkdir -p "kernel/arch/arm64/configs/$(dirname "${frag}")"
               cp "skyward/kernel/${frag#vendor/}" "kernel/arch/arm64/configs/${frag}"
