@@ -104,7 +104,6 @@ path = "/vendor/bin/wcnss_service"
 libraries = ["/system/lib64", "/vendor/lib64"]
 user = "system"
 groups = ["system", "wifi", "radio"]
-oneshot = true
 
 # The directory the phone's hardware services register with. A recovery
 # carries none of it — it is on the installed system's system partition,
