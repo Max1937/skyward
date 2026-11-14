@@ -676,9 +676,15 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
         for path in skyward_modules::load(modules, &cfg.modules)? {
             skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
         }
-        for w in &cfg.writes {
-            fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
-        }
+    }
+    // The writes configure the driver itself (a built-in prima driver reads
+    // con_mode only as it probes). Do them even when the interface already
+    // exists, and before trying to bring it up: with con_mode at its default
+    // 0 the driver registers wlan0 but SIOCSIFFLAGS(IFF_UP) answers EINVAL.
+    for w in &cfg.writes {
+        fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
+    }
+    if !net.exists() {
         let until = Instant::now() + INTERFACE_WAIT;
         while !net.exists() {
             ensure!(Instant::now() < until, "the driver made no {} in {} seconds", cfg.interface, INTERFACE_WAIT.as_secs());
