@@ -48,14 +48,6 @@ mod android {
         init: [u64; 2],
     }
 
-    #[repr(C)]
-    struct Config {
-        fd: u32,
-        block_size: u32,
-        info: Info,
-        reserved: [u64; 8],
-    }
-
     /// Open `file` from `offset` for `length` bytes as a block device, and
     /// give its path. The device goes away once whatever is mounted from it
     /// is unmounted.
@@ -72,13 +64,21 @@ mod android {
             .write(true)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
-        let mut config: Config = unsafe { std::mem::zeroed() };
-        config.fd = backing.as_raw_fd() as u32;
-        config.info.offset = offset;
-        config.info.size_limit = length;
-        config.info.flags = READ_ONLY;
-        if unsafe { libc::ioctl(device.as_raw_fd(), CONFIGURE as libc::Ioctl, &mut config) } < 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| format!("point {} at {}", path.display(), file.display()));
+        // Older kernels answer LOOP_CONFIGURE as though it worked while the
+        // device reads nothing. Bind the file, clear any old association and
+        // describe the part of it to read in the three calls 4.19 answers.
+        if unsafe { libc::ioctl(device.as_raw_fd(), CLR_FD as libc::Ioctl) } < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| format!("clear {}", path.display()));
+        }
+        if unsafe { libc::ioctl(device.as_raw_fd(), SET_FD as libc::Ioctl, backing.as_raw_fd()) } < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| format!("bind {} to {}", path.display(), file.display()));
+        }
+        let mut info: Info = unsafe { std::mem::zeroed() };
+        info.offset = offset;
+        info.size_limit = length;
+        info.flags = READ_ONLY;
+        if unsafe { libc::ioctl(device.as_raw_fd(), SET_STATUS64 as libc::Ioctl, &mut info) } < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| format!("describe {} from {}", path.display(), file.display()));
         }
         Ok(path)
     }
