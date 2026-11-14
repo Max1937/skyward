@@ -572,11 +572,6 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         let handed = hand_over(&cfg.owners)?;
         skyward_sys::kmsg(&format!("{handed} of the phone's own files handed to the accounts its init gives them"))?;
     }
-    let hardware: Vec<String> = services.iter().filter_map(|s| s.ready_hardware_service.clone()).collect();
-    if !hardware.is_empty() {
-        secure::prepare_hardware_directory(&hardware)?;
-        skyward_sys::kmsg("the directory for the phone's hardware services can run")?;
-    }
     // Only a program that has to register with the service directory needs
     // the directory to know the phone describes it. The WLAN's supplicant
     // registers whenever the WLAN is turned on, and the directory can no
@@ -584,6 +579,14 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     // and nothing would register that again.
     let mut registering: Vec<String> = services.iter().flat_map(|s| s.ready_service.iter().chain(&s.registers).cloned()).collect();
     registering.extend(cfg.wlan.iter().map(|w| w.service.clone()));
+    // Both kinds are declared in the one description the directory reads:
+    // the older ones are written here from their names, and the newer ones
+    // from the description the phone itself gives.
+    let hardware: Vec<String> = services.iter().filter_map(|s| s.ready_hardware_service.clone()).collect();
+    if !hardware.is_empty() || !registering.is_empty() {
+        secure::prepare_hardware_directory(&hardware, &registering)?;
+        skyward_sys::kmsg("the directory for the phone's hardware services can run")?;
+    }
     let files: Vec<String> = services.iter().filter_map(|s| s.description.clone()).collect();
     if !registering.is_empty() || !files.is_empty() {
         let described = secure::publish_descriptions(&registering, &files)?;
