@@ -47,10 +47,11 @@ partition = "modem"
 modules = []
 # The prima driver is built into the kernel (there is no .ko to insmod), so
 # init.qcom.rc's `insmod pronto_wlan.ko con_mode=5` never runs and the
-# module parameter stays 0: the driver registers wlan0 but never opens it,
-# and SIOCSIFFLAGS(IFF_UP) answers EINVAL (os error 22). Set it before the
-# driver probes.
-writes = [{ path = "/sys/module/wlan/parameters/con_mode", value = "5" }]
+# module parameter stays at its default and the driver is never loaded, so
+# no wlan0 is made. con_mode 0 is the station mode this driver serves;
+# other values register a wlan0 that refuses SIOCSIFFLAGS(IFF_UP) with
+# EINVAL (os error 22). Write it before bringing the interface up.
+writes = [{ path = "/sys/module/wlan/parameters/con_mode", value = "0" }]
 firmware = [
     # The NV image the kernel asks for by this subpath once pronto is up.
     # It lives under the board-id folders in the vendor partition, not where
