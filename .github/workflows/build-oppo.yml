@@ -35,7 +35,7 @@ on:
       kernel:
         description: A57 kernel variant (49 = TipzTeam 4.9, 419 = XuexGao 4.19)
         required: false
-        default: "49"
+        default: "419"
         type: choice
         options:
           - "49"
@@ -49,9 +49,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # A57 kernel variant: "49" (default) = TipzTeam 4.9 tree with its own
-  # lineageos_<device>_recovery_defconfig; "419" = the prior XuexGao 4.19 base.
-  KERNEL_VARIANT: ${{ github.event.inputs.kernel || '49' }}
+  # A57 kernel variant: "419" (default) = XuexGao 4.19, the one whose
+  # msm_drm/DSI driver lights this A57 panel. "49" = TipzTeam 4.9 tree
+  # (builds, but the panel stays black with every DTB tried); experimental.
+  KERNEL_VARIANT: ${{ github.event.inputs.kernel || '419' }}
   # The toolchain the kernel's own CI builds with.
   CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/13.0.1-20230207-release/Clang-13.0.1-20230207.tar.gz
 
