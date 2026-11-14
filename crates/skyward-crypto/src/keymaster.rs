@@ -26,13 +26,12 @@ const INSTANCE: &str = "default";
 /// The methods, as the interface numbers them. A phone's own library
 /// numbers them by their order in the interface, which starts at one:
 /// `addRngEntropy` is the first, and `abort` the last.
-const GET_HARDWARE_FEATURES: u32 = 1;
-const GET_KEY_CHARACTERISTICS: u32 = 4;
-const UPGRADE_KEY: u32 = 7;
-const BEGIN: u32 = 10;
-const UPDATE: u32 = 11;
-const FINISH: u32 = 12;
-const ABORT: u32 = 13;
+const GET_KEY_CHARACTERISTICS: u32 = 3;
+const UPGRADE_KEY: u32 = 5;
+const BEGIN: u32 = 8;
+const UPDATE: u32 = 9;
+const FINISH: u32 = 10;
+const ABORT: u32 = 11;
 
 // The tags, as `android.hardware.keymaster@3.0::Tag` numbers them: the kind
 // of value it carries in the top bits, then its own number. The kind is
@@ -63,15 +62,6 @@ const GCM_TAG_BITS: u32 = 128;
 /// How long the nonce of a GCM key is.
 const NONCE_BYTES: usize = 12;
 
-/// What the phone says about its key hardware.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Features {
-    pub version: i32,
-    pub security_level: i32,
-    /// The kinds of key it can make and use, each a number of its own.
-    pub algorithms: Vec<u32>,
-}
-
 /// The phone's key service, as this program talks to it.
 pub struct Keymaster<'a> {
     device: Handle<'a>,
@@ -83,21 +73,6 @@ impl<'a> Keymaster<'a> {
         let device = hidl::find(hardware, SERVICE, INSTANCE)?
             .with_context(|| format!("{SERVICE}/{INSTANCE} is not running; the phone's key service has to be started first"))?;
         Ok(Keymaster { device })
-    }
-
-    /// What the service says about itself. It changes nothing and takes no
-    /// key, so it is what to call to see that the service answers.
-    pub fn features(&self) -> Result<Features> {
-        let reply = self.device.transact(GET_HARDWARE_FEATURES, &Message::call(SERVICE)).context("ask the key service about itself")?;
-        let mut read = Answer::new(reply.bytes());
-        read.status().context("ask the key service about itself")?;
-        let version = read.i32().context("read the key service's version")?;
-        let security_level = read.i32().context("read where the key service runs")?;
-        let mut algorithms = Vec::new();
-        for _ in 0..read.count().context("read how many kinds of key the service makes")? {
-            algorithms.push(read.count().context("read a kind of key")?);
-        }
-        Ok(Features { version, security_level, algorithms })
     }
 
     /// What the service says a key is bound to and may be used for.
@@ -157,28 +132,37 @@ impl<'a> Keymaster<'a> {
     }
 
     /// Open a decryption with the key service and keep hold of it.
-    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Handle<'a>> {
+    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], _note: Option<&Token>) -> Result<Handle<'a>> {
         let params = gcm_parameters(app_id, nonce);
         let mut call = Message::call(SERVICE);
         call.u32(PURPOSE_DECRYPT);
         call.bytes(key_blob);
         write_parameters(&mut call, &params);
-        // A key guarded by the screen lock takes the note the secure world
-        // wrote when it was answered; one that is not guarded takes an empty
-        // one, which is a note all the same.
-        write_note(&mut call, note);
+        // The older interface takes no note of who asked, and asks for none
+        // here: the answer carries only the parameters and the number of
+        // the decryption it opened.
 
         // The decryption the service opens outlives the reply that named
         // it, so take a share of it before the reply's room goes back.
         let reply = self.device.transact(BEGIN, &call).context("start a decryption")?;
-        let mut read = Answer::new(reply.bytes());
+        let raw = reply.bytes().to_vec();
+        let mut read = Answer::new(&raw);
         read.status().context("start a decryption")?;
         let code = read.i32().context("read whether a decryption was opened")?;
         if code != 0 {
             bail!("the key service answered {code} for the decryption it was asked to open");
         }
-        let handle = read.number().context("read the decryption the key service opened")?;
+        // The parameters come first, and the number of the decryption
+        // closes the answer.
         read_parameters(&mut read).context("read how the decryption is set up")?;
+        let handle = read.number().with_context(|| {
+            let shown: Vec<String> = raw.iter().take(48).map(|b| format!("{b:02x}")).collect();
+            format!(
+                "read the decryption the key service opened, from a reply of {} bytes: {}",
+                raw.len(),
+                shown.join(" ")
+            )
+        })?;
         match handle {
             0 => bail!("the key service opened no decryption"),
             h => Ok(Handle::hold(reply.binder(), u32::try_from(h).context("the decryption's number")?)?),
@@ -190,7 +174,6 @@ impl<'a> Keymaster<'a> {
         call.u64(operation.number() as u64);
         write_parameters(&mut call, &[]);
         call.bytes(input);
-        write_note(&mut call, None);
         let reply = operation.transact(UPDATE, &call).context("feed the decryption")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("feed the decryption")?;
@@ -198,13 +181,13 @@ impl<'a> Keymaster<'a> {
         if code != 0 {
             bail!("the key service answered {code} for what it was given to decrypt");
         }
-        read_parameters(&mut read).context("read how the decryption is set up")?;
+        // The answer names how much was taken before the parameters and the
+        // output follow, neither of which is worth reading for a decryption
+        // whose tag is checked at the end, where the answer comes whole.
         let taken = read.i32().context("read how much the decryption took")?;
         if taken as usize != input.len() {
             bail!("the decryption took {taken} of the {} bytes it was given", input.len());
         }
-        // A decryption whose tag is checked at the end gives nothing back
-        // until then, so what it took is all this call answers with.
         Ok(Vec::new())
     }
 
@@ -214,7 +197,6 @@ impl<'a> Keymaster<'a> {
         write_parameters(&mut call, &[]);
         call.bytes(&[]);
         call.bytes(&[]);
-        write_note(&mut call, None);
         let reply = operation.transact(FINISH, &call).context("close the decryption")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("close the decryption, which is where a wrong key is refused")?;
@@ -386,13 +368,12 @@ mod tests {
     fn the_methods_are_the_ones_the_interface_lists_in_the_order_it_lists_them() {
         // The interface lists these in this order, and a phone's own library
         // numbers them from one.
-        assert_eq!(GET_HARDWARE_FEATURES, 1);
-        assert_eq!(GET_KEY_CHARACTERISTICS, 4);
-        assert_eq!(UPGRADE_KEY, 7);
-        assert_eq!(BEGIN, 10);
-        assert_eq!(UPDATE, 11);
-        assert_eq!(FINISH, 12);
-        assert_eq!(ABORT, 13);
+        assert_eq!(GET_KEY_CHARACTERISTICS, 3);
+        assert_eq!(UPGRADE_KEY, 5);
+        assert_eq!(BEGIN, 8);
+        assert_eq!(UPDATE, 9);
+        assert_eq!(FINISH, 10);
+        assert_eq!(ABORT, 11);
     }
 
     /// A tag is built out of the kind of value and a number, so it is wider
