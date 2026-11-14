@@ -83,7 +83,7 @@ const RECOVERY_MANIFEST: &str = "/system/etc/vintf/manifest.xml";
 /// filesystem, does not have.
 ///
 /// `wanted` names the hardware services that will be asked for.
-pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
+pub fn prepare_hardware_directory(wanted: &[String], newer: &[String]) -> Result<()> {
     // A loader and the lowest libraries are built together and agree
     // between them on how a program's own storage is laid out, so the
     // installed system's programs are loaded by the installed system's
@@ -150,7 +150,7 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     if let Some(dir) = manifest.parent() {
         fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
     }
-    fs::write(manifest, describe_hardware(wanted)?).with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
+    fs::write(manifest, describe_hardware(wanted, newer)?).with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
     fs::set_permissions(manifest, std::os::unix::fs::PermissionsExt::from_mode(0o644))
         .with_context(|| format!("let every user read {RECOVERY_MANIFEST}"))?;
     // The directory turns itself off when it cannot find its own
@@ -164,7 +164,7 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
 /// asked for, and of the directory they are asked of. Each is named as the
 /// package it is in and the rest of its name, which is how a description
 /// holds the two.
-fn describe_hardware(wanted: &[String]) -> Result<String> {
+fn describe_hardware(wanted: &[String], newer: &[String]) -> Result<String> {
     let mut out = String::from("<manifest version=\"1.0\" type=\"framework\">\n");
     for name in std::iter::once(HARDWARE_DIRECTORY).chain(wanted.iter().map(String::as_str)) {
         let (package, rest) = name
@@ -176,8 +176,50 @@ fn describe_hardware(wanted: &[String]) -> Result<String> {
         out.push_str(&format!("        <fqname>@{rest}</fqname>\n"));
         out.push_str("    </hal>\n");
     }
+    // Services of the newer kind are described by the phone's own partitions
+    // and not by a name of the older shape here. The reader of this file
+    // takes only this file: it does not read the folder the descriptions are
+    // published in, so a service declared only there is turned away when it
+    // registers. Copy each of their descriptions in whole, as the phone
+    // gives it, which keeps the version it says.
+    for name in newer {
+        if name.contains('@') {
+            continue;
+        }
+        if let Some(block) = newer_description(name)? {
+            out.push_str(&block);
+        }
+    }
     out.push_str("</manifest>\n");
     Ok(out)
+}
+
+/// The description of the newer service `name`, as one block to put in the
+/// manifest, copied from the description the phone's own partitions carry.
+fn newer_description(name: &str) -> Result<Option<String>> {
+    for dir in DESCRIPTIONS {
+        let listing = match fs::read_dir(dir) {
+            Ok(listing) => listing,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("read {dir}")),
+        };
+        for entry in listing {
+            let from = entry.with_context(|| format!("read {dir}"))?.path();
+            if from.extension().is_none_or(|e| e != "xml") {
+                continue;
+            }
+            let text = fs::read_to_string(&from).with_context(|| format!("read {}", from.display()))?;
+            if !describes(&text, name) {
+                continue;
+            }
+            let Some(start) = text.find("<hal") else { continue };
+            let Some(rel) = text[start..].find("</hal>") else { continue };
+            let mut block = text[start..start + rel + "</hal>".len()].to_string();
+            block.push('\n');
+            return Ok(Some(block));
+        }
+    }
+    Ok(None)
 }
 
 /// Open the bundle of libraries the phone's own partitions were built
