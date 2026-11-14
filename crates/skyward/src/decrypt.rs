@@ -122,10 +122,11 @@ fn try_key_services<T>(work: impl FnOnce(&dyn KeyService) -> Result<T>) -> Resul
     }
     match Binder::hardware() {
         Ok(hardware) => match Keymaster::open(&hardware) {
-            Ok(service) => match service.features() {
-                Ok(_) => (work.take().expect("the work is done once"))(&service),
-                Err(e) => anyhow::bail!("no key service answered; {}; the older one: {e:#}", refusals.join("; ")),
-            },
+            // A probe transaction used to be sent here (features()). The
+            // corrected keymaster@3.0 interface has no such call, and probing
+            // with a possibly misnumbered method is how deleteAllKeys was
+            // nearly reached. Being able to open the service is enough.
+            Ok(service) => (work.take().expect("the work is done once"))(&service),
             Err(e) => anyhow::bail!("no key service answered; {}; the older one: {e:#}", refusals.join("; ")),
         },
         Err(e) => anyhow::bail!(
