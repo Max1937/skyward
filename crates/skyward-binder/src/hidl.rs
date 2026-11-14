@@ -338,7 +338,25 @@ pub fn find<'a>(binder: &'a crate::driver::Binder, interface: &str, instance: &s
     let mut call = Message::call(DIRECTORY);
     call.text(interface);
     call.text(instance);
-    let reply = directory.transact(GET, &call).with_context(|| format!("look up {interface}/{instance}"))?;
+    // hwservicemanager takes the binder a moment after it starts; a GET
+    // made before then is refused with -22 / 'the other side is gone' and
+    // reads the same as 'nothing registered'. Retry briefly before giving
+    // up, or the A57's keymaster service is never found.
+    let reply = {
+        let mut tries = 0;
+        loop {
+            match directory.transact(GET, &call) {
+                Ok(reply) => break reply,
+                Err(e) => {
+                    tries += 1;
+                    if tries >= 5 {
+                        return Err(e).with_context(|| format!("look up {interface}/{instance}"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+    };
     let mut read = Answer::new(reply.bytes());
     read.status().with_context(|| format!("look up {interface}/{instance}"))?;
     match read.object().with_context(|| format!("read what the directory answered for {interface}"))? {
