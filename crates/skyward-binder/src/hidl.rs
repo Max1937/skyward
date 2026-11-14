@@ -500,14 +500,12 @@ mod tests {
         assert_eq!(Message::call("a.b@1.0::IC").data.len(), 12, "a name already on a boundary takes no room");
     }
 
-    /// And the arguments after such a name start where the reader walks
-    /// to, which is the boundary of four the name was stepped over to.
+    /// And the arguments after such a name start where the name ends.
     #[test]
     fn the_arguments_after_a_name_whose_length_leaves_a_remainder_follow_it() {
         let mut m = Message::call("android.hidl.manager@1.0::IServiceManager");
         m.u32(7);
-        assert_eq!(m.data.len(), 44 + 4, "stepped over to a boundary of four, then the value");
-        assert_eq!(u32::from_le_bytes(m.data[44..48].try_into().unwrap()), 7, "where the reader walks to");
+        assert_eq!(u32::from_le_bytes(m.data[42..46].try_into().unwrap()), 7, "right after the terminator");
     }
 
     #[test]
@@ -520,21 +518,22 @@ mod tests {
         assert_eq!(u64::from_le_bytes(m.data[16..24].try_into().unwrap()), 1 << 40);
     }
 
-    /// A value wider than a word is written where the value before it
-    /// ended, as every value is: the phone's own writer puts nothing in
-    /// front of a value, and its reader takes each one from there.
+    /// The interface's own writer puts a value wider than a word on a
+    /// boundary of its width. A method number takes a word, so a call whose
+    /// interface name leaves the values four bytes in from a boundary lands
+    /// its number where an unaligned write would go wrong.
     #[test]
-    fn a_number_wider_than_a_word_is_not_moved_to_a_boundary_of_its_own() {
-        // Fifteen characters and a terminator, stepped over to a boundary
-        // of four: the values start at 16, and a number written four bytes
-        // in from it starts at 20 with nothing in front.
+    fn a_number_wider_than_a_word_goes_on_a_boundary_of_its_own_width() {
+        // Fifteen characters and a terminator: the values start at 16, and
+        // one word after that is 20, which is not a boundary of eight.
         let mut m = Message::call("abcdefghijklmno");
-        assert_eq!(m.data.len(), 16, "the name, its terminator, and the room to a boundary of four");
+        assert_eq!(m.data.len(), 16, "the name, its terminator, and padding to four");
         m.u32(10);
         assert_eq!(m.data.len(), 20);
         m.u64(0x0102_0304_0506_0708);
-        assert_eq!(m.data.len(), 28, "the number, with no room in front of it");
-        assert_eq!(u64::from_le_bytes(m.data[20..28].try_into().unwrap()), 0x0102_0304_0506_0708);
+        assert_eq!(m.data.len(), 20 + 4 + 8, "four bytes of padding, then the number");
+        assert_eq!(&m.data[20..24], &[0, 0, 0, 0], "the padding is zeros");
+        assert_eq!(u64::from_le_bytes(m.data[24..32].try_into().unwrap()), 0x0102_0304_0506_0708);
     }
 
     /// A number takes no padding in front of it, whatever its width: the
@@ -558,11 +557,10 @@ mod tests {
     /// nothing between them.
     #[test]
     fn an_address_stands_where_the_reader_walks_to() {
-        // The directory's own name is forty-one characters and a terminator,
-        // which the call steps over to forty-four; the frame of the text is
-        // the first address there, and the bytes of it follow right after.
+        // The directory's own name is forty-one characters and a
+        // terminator, which the reader steps over to forty-four.
         let mut m = Message::call("android.hidl.manager@1.0::IServiceManager");
-        assert_eq!(m.data.len(), 44, "the name, its terminator, and the step to a boundary of four");
+        assert_eq!(m.data.len(), 42, "the name and its terminator");
         m.text("android.hardware.keymaster@3.0::IKeymasterDevice/default");
         assert_eq!(m.addresses, vec![44, 84], "the frame, then the bytes, back to back");
         assert_eq!(m.data.len(), 44 + 40 + 40);
