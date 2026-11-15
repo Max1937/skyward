@@ -84,7 +84,20 @@ pub fn storage_key(service: &dyn KeyService, entry: &Entry, encryption: &Encrypt
 /// itself: what comes back is wrapped again, for this start only.
 fn hardware_key(service: &dyn KeyService, dir: &Path, wrapped: bool) -> Result<Vec<u8>> {
     let stored = StoredKey::load(dir).with_context(|| format!("read the key in {}", dir.display()))?;
-    let key = stored.unwrap(Unwrap::Hardware(service)).with_context(|| format!("unwrap the key in {}", dir.display()))?;
+    // The key is kept wrapped by the phone's secure world, and on a phone
+    // whose secure world will not unwrap it, by the value the directory is
+    // bound to instead: the same wrapping a user's own key takes, without a
+    // secret in front of it. A recovery has to open both, because the phone
+    // it was started on may keep either.
+    let key = match stored.unwrap(Unwrap::Hardware(service)) {
+        Ok(key) => key,
+        Err(e) => stored.unwrap(Unwrap::Secret(&[])).with_context(|| {
+            format!(
+                "unwrap the key in {}, which the secure world would not ({e:#}), by its binding",
+                dir.display()
+            )
+        })?,
+    };
     match wrapped {
         true => service.ephemeral_storage_key(&key).with_context(|| format!("make the key in {} usable now", dir.display())),
         false => Ok(key),
@@ -305,10 +318,16 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
 
 /// Whether what is on the mounted partition reads as it lies: a phone whose
 /// data was never encrypted, or whose key no longer opens it, keeps the
-/// record of each user's lock in plain sight.
+/// record of each user's lock in plain sight, under the names the phone gave
+/// those files rather than under names encrypted with a key.
 fn reads_as_it_lies() -> bool {
-    let system = std::path::Path::new("/data/system_de/0");
-    system.is_dir() || std::path::Path::new("/data/misc/vold/user_keys").is_dir()
+    let spblob = std::fs::read_dir("/data/system_de/0/spblob")
+        .map(|entries| entries.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".spblob")))
+        .unwrap_or(false);
+    let users = std::fs::read_dir("/data/system/users")
+        .map(|entries| entries.flatten().any(|e| e.file_name().to_string_lossy() == "0.xml"))
+        .unwrap_or(false);
+    spblob || users
 }
 
 /// Which users the phone keeps the keys for their own files for, whether or
