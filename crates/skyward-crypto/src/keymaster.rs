@@ -17,7 +17,7 @@
 use crate::token::Token;
 use anyhow::{bail, Context, Result};
 use skyward_binder::driver::{Binder, Handle};
-use skyward_binder::hidl::{self, Answer, Message, Parameter};
+use skyward_binder::hidl::{self, Answer, Bytes, Message, Parameter, Value};
 
 /// The hardware service, and the instance it serves as.
 pub const SERVICE: &str = "android.hardware.keymaster@3.0::IKeymasterDevice";
@@ -201,12 +201,13 @@ impl<'a> Keymaster<'a> {
     }
 
     /// Open a decryption with the key service and keep hold of it.
-    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Handle<'a>> {
+    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], _note: Option<&Token>) -> Result<Handle<'a>> {
         // begin() is the one method of this interface that still takes the
         // note: update() and finish() lost theirs in the newer interface, but
-        // here it is the fourth argument, and leaving it out makes the far
-        // side read past the parcel and refuse the whole call.
-        let token = note.map(token_bytes).unwrap_or_default();
+        // here it is the fourth argument, the HardwareAuthToken, a structure
+        // of its own (not a vec<uint8_t> blob). Leaving it out makes the far
+        // side read past the parcel and refuse the whole call, so an empty
+        // token is written inline when the key is not bound to a screen lock.
         let mut params = vec![
             (TAG_BLOCK_MODE, Value::Enum(BLOCK_MODE_GCM)),
             (TAG_PADDING, Value::Enum(PADDING_NONE)),
@@ -222,7 +223,7 @@ impl<'a> Keymaster<'a> {
         call.u32(PURPOSE_DECRYPT);
         call.bytes(key_blob);
         write_parameters(&mut call, &params);
-        call.bytes(&token);
+        token_none(&mut call);
 
         // The decryption the service opens outlives the reply that named
         // it, so take a share of it before the reply's room goes back.
@@ -292,29 +293,45 @@ enum Value<'a> {
     Bytes(&'a [u8]),
 }
 
-/// Write a list of parameters: how many there are, then each as the two
-/// members it is, the tag and then what the tag says the value is.
+/// Write a list of parameters: how many there are, then each as a structure
+/// of its own, so the far side can step over what it does not know.
 ///
-/// Nothing goes in front of a parameter. Each one is a `KeyParameter`,
-/// which the interface writes as its tag and then the arm the tag names, one
-/// after another with no length of its own; a length written here is read as
-/// the tag, and a tag that is not one of the interface's makes the far side
-/// refuse the whole call with -EINVAL.
+/// A `KeyParameter` on the wire is a structure: a word that says it is there
+/// and a length, then the tag and the value the tag names. A value that is an
+/// enum or a number is written inline in the structure, and one that is bytes
+/// is handed over as its own buffer, the way the binder carries anything
+/// longer than a word. A parameter written any other way makes the far side
+/// read the tag as a length and refuse the whole call with -EINVAL.
 fn write_parameters(call: &mut Message, params: &[(u32, Value<'_>)]) {
     call.u32(params.len() as u32);
     for (tag, value) in params {
+        let at = call.structure();
         call.u32(*tag);
         match value {
             Value::Enum(v) | Value::Uint(v) => call.u32(*v),
-            // The arm that carries bytes is a run of bytes, which the far
-            // side reads on a boundary of eight: the four bytes the tag
-            // takes are followed by four of padding before it.
-            Value::Bytes(b) => {
-                call.pad_to(8);
-                call.bytes(b);
-            }
+            Value::Bytes(b) => call.bytes(b),
         }
+        call.fill(at);
     }
+}
+
+/// The fourth argument of keymaster@3.0 `begin`, the `HardwareAuthToken`, as
+/// the older interface takes it: a structure of its own, with nothing set.
+/// A user whose data is not bound to a screen lock hands over this empty
+/// token, and the secure world unwraps the key under it without a challenge.
+fn token_none(call: &mut Message) {
+    let at = call.structure();
+    call.u8(0); // version: the layout the older token uses
+    call.u8(0); // challenge: none
+    call.u8(0); // user: none
+    call.u8(0); // authenticator: none
+    call.u32(0); // authenticator type: none
+    call.u64(0); // timestamp: the beginning of time
+    // The thirty-two bytes of the signature, written inline in the structure.
+    for _ in 0..32 {
+        call.u8(0);
+    }
+    call.fill(at);
 }
 
 /// The note the secure world wrote, as the older interface takes it: the
