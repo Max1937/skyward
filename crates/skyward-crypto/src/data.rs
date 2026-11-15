@@ -263,6 +263,7 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
     // lies: that is what a recovery is for, and what the phone's own
     // installer shows of the same partition.
     if let Err(e) = open_shared(service) {
+        println!("skyward: could not open the key the data partition is wrapped in: {e:#}");
         if !reads_as_it_lies() {
             return Err(e).context("open the key the data partition is wrapped in");
         }
@@ -273,6 +274,7 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
     let mut users = match open_users(service) {
         Ok(users) => users,
         Err(e) => {
+            println!("skyward: could not open the keys of the users' own files: {e:#}");
             if !reads_as_it_lies() {
                 return Err(e).context("open the keys of the users' own files");
             }
@@ -288,10 +290,12 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
         }
     }
     users.sort_unstable();
+    println!("skyward: the users whose own files are still closed: {users:?} (from keys: {:?})", users_with_own_files());
     for user in users {
         let protector = match protector(user) {
             Ok(protector) => protector,
             Err(e) => {
+                println!("skyward: user {user}'s own secret does not read: {e:#}");
                 if reads_as_it_lies() {
                     println!("skyward: what user {user}'s lock keeps does not read, and their files read as they lie: {e:#}");
                     continue;
@@ -307,6 +311,7 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
                     }
                 }
                 Err(e) => {
+                    println!("skyward: user {user}'s own files did not open: {e:#}");
                     if !reads_as_it_lies() {
                         return Err(e);
                     }
