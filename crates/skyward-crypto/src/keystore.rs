@@ -99,6 +99,18 @@ impl StoredKey {
         id
     }
 
+    /// The blob the key service holds the key in, when this directory keeps
+    /// one: what a call to the service is given to name the key.
+    pub fn key_blob(&self) -> Option<&[u8]> {
+        self.key_blob.as_deref()
+    }
+
+    /// What the key is bound to, for a secret that guards it: the same value
+    /// a call to the service has to give for the key to be accepted.
+    pub fn bound_to(&self, secret: &[u8]) -> Vec<u8> {
+        self.app_id(secret)
+    }
+
     /// What the phone's key service says the wrapping key may be used for.
     #[cfg(target_os = "android")]
     pub fn authorizations(&self, service: &crate::keymint::KeyMint) -> Result<Vec<(i32, i64)>> {
