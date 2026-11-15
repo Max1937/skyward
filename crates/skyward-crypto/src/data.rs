@@ -41,28 +41,6 @@ fn install_key(raw: &[u8], wrapped: bool) -> Result<[u8; crate::fscrypt::NAME_BY
     crate::fscrypt::add_key_named(Path::new(MOUNT), raw, wrapped, naming)
 }
 
-/// Say something where it can be read even from a recovery: the kernel's
-/// own log. The ordinary `println!` of this crate goes nowhere on a phone.
-#[cfg(target_os = "android")]
-fn tell(line: String) {
-    use std::io::Write;
-    if let Ok(mut log) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
-        let _ = writeln!(log, "skyward: data: {line}");
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn tell(_: String) {}
-
-/// A step's outcome, written where it can be read after the recovery starts.
-fn trace(line: String) {
-    tell(line.clone());
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("/data/unencrypted/skyward-trace") {
-        use std::io::Write;
-        let _ = writeln!(file, "{line}");
-    }
-}
-
 /// Where the data partition is mounted, and the name its decrypted form is
 /// given among the device-mapper's devices.
 pub const MOUNT: &str = "/data";
@@ -136,15 +114,9 @@ fn hardware_key(service: &dyn KeyService, dir: &Path, wrapped: bool) -> Result<V
     // it was started on may keep either.
     let key = match stored.unwrap(Unwrap::Hardware(service)) {
         Ok(key) => key,
-        Err(e) => match stored.unwrap(Unwrap::<dyn KeyService>::Secret(&[])) {
-            Ok(key) => key,
-            Err(by_binding) => stored.unwrap_by(&[]).with_context(|| {
-                format!(
-                    "unwrap the key in {}, which the secure world would not ({e:#}), neither by its binding ({by_binding:#}) nor by nothing at all",
-                    dir.display()
-                )
-            })?,
-        },
+        Err(e) => stored.unwrap(Unwrap::<dyn KeyService>::Secret(&[])).with_context(|| {
+            format!("unwrap the key in {}, which the secure world would not ({e:#}), by its binding", dir.display())
+        })?,
     };
     match wrapped {
         true => service.ephemeral_storage_key(&key).with_context(|| format!("make the key in {} usable now", dir.display())),
@@ -308,22 +280,20 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
     // lies: that is what a recovery is for, and what the phone's own
     // installer shows of the same partition.
     if let Err(e) = open_shared(service) {
-        trace(format!("could not open the key the data partition is wrapped in: {e:#}"));
         if !reads_as_it_lies() {
             return Err(e).context("open the key the data partition is wrapped in");
         }
-    } else {
-        trace("the key the data partition is wrapped in is in".to_string());
+        println!("skyward: the key that wraps the data partition does not open it, and what is on it reads as it lies: {e:#}");
     }
     let mut closed = Vec::new();
     let mut owner = Note::default();
     let mut users = match open_users(service) {
         Ok(users) => users,
         Err(e) => {
-            trace(format!("could not open the keys of the users' own files: {e:#}"));
             if !reads_as_it_lies() {
                 return Err(e).context("open the keys of the users' own files");
             }
+            println!("skyward: the users' own keys do not open, and their files read as they lie: {e:#}");
             Vec::new()
         }
     };
@@ -335,13 +305,12 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
         }
     }
     users.sort_unstable();
-    trace(format!("users from de keys {users:?}, from ce keys {:?}", users_with_own_files()));
     for user in users {
         let protector = match protector(user) {
             Ok(protector) => protector,
             Err(e) => {
-                trace(format!("user {user}'s own secret does not read: {e:#}"));
                 if reads_as_it_lies() {
+                    println!("skyward: what user {user}'s lock keeps does not read, and their files read as they lie: {e:#}");
                     continue;
                 }
                 return Err(e);
@@ -350,22 +319,18 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
         match protector.lock {
             None => match open_user_files(service, user, None, None) {
                 Ok(note) => {
-                    trace(format!("user {user}'s own files are open"));
                     if user == OWNER {
                         owner = note;
                     }
                 }
                 Err(e) => {
-                    trace(format!("user {user}'s own files did not open: {e:#}"));
                     if !reads_as_it_lies() {
                         return Err(e);
                     }
+                    println!("skyward: user {user}'s own files read as they lie: {e:#}");
                 }
             },
-            Some(lock) => {
-                trace(format!("user {user} has a lock of kind {:?}", lock.kind));
-                closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None });
-            }
+            Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
         }
     }
     Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
