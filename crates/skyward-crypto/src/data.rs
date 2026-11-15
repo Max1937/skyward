@@ -91,7 +91,7 @@ fn hardware_key(service: &dyn KeyService, dir: &Path, wrapped: bool) -> Result<V
     // it was started on may keep either.
     let key = match stored.unwrap(Unwrap::Hardware(service)) {
         Ok(key) => key,
-        Err(e) => stored.unwrap(Unwrap::Secret(&[])).with_context(|| {
+        Err(e) => stored.unwrap(Unwrap::<dyn KeyService>::Secret(&[])).with_context(|| {
             format!(
                 "unwrap the key in {}, which the secure world would not ({e:#}), by its binding",
                 dir.display()
