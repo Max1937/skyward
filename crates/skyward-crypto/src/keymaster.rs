@@ -18,6 +18,7 @@ use crate::token::Token;
 use anyhow::{bail, Context, Result};
 use skyward_binder::driver::{Binder, Handle};
 use skyward_binder::hidl::{self, Answer, Message, Parameter};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The hardware service, and the instance it serves as.
 pub const SERVICE: &str = "android.hardware.keymaster@3.0::IKeymasterDevice";
@@ -52,6 +53,10 @@ const TAG_BLOCK_MODE: u32 = KIND_ENUM | 4;
 const TAG_PADDING: u32 = KIND_ENUM | 6;
 const TAG_APPLICATION_ID: u32 = KIND_BYTES | 601;
 const TAG_NONCE: u32 = KIND_BYTES | 1001;
+/// The note the secure world wrote, when the key is bound to a screen lock.
+/// It travels among the parameters, not as an argument of its own: `begin`
+/// takes three things, as the interface lists it.
+const TAG_AUTH_TOKEN: u32 = KIND_BYTES | 1002;
 const TAG_MAC_LENGTH: u32 = KIND_UINT | 1003;
 
 /// The tag stripped of the kind of value it carries, which is how the same
@@ -201,13 +206,13 @@ impl<'a> Keymaster<'a> {
     }
 
     /// Open a decryption with the key service and keep hold of it.
-    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], _note: Option<&Token>) -> Result<Handle<'a>> {
-        // begin() is the one method of this interface that still takes the
-        // note: update() and finish() lost theirs in the newer interface, but
-        // here it is the fourth argument, the HardwareAuthToken, a structure
-        // of its own (not a vec<uint8_t> blob). Leaving it out makes the far
-        // side read past the parcel and refuse the whole call, so an empty
-        // token is written inline when the key is not bound to a screen lock.
+    ///
+    /// `begin` takes three things, as `IKeymasterDevice` lists it: the
+    /// purpose, the key, and the parameters. There is no fourth argument: a
+    /// note the secure world wrote, when the key is bound to a screen lock,
+    /// travels among the parameters, tagged as one.
+    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Handle<'a>> {
+        let token = note.map(token_bytes);
         let mut params = vec![
             (TAG_BLOCK_MODE, Value::Enum(BLOCK_MODE_GCM)),
             (TAG_PADDING, Value::Enum(PADDING_NONE)),
@@ -217,17 +222,43 @@ impl<'a> Keymaster<'a> {
             params.push((TAG_APPLICATION_ID, Value::Bytes(app_id)));
         }
         params.push((TAG_NONCE, Value::Bytes(nonce)));
+        if let Some(token) = &token {
+            params.push((TAG_AUTH_TOKEN, Value::Bytes(token)));
+        }
         params.push((TAG_PURPOSE, Value::Enum(PURPOSE_DECRYPT)));
 
         let mut call = Message::call(SERVICE);
         call.u32(PURPOSE_DECRYPT);
         call.bytes(key_blob);
         write_parameters(&mut call, &params);
-        token_none(&mut call);
+        if diag_left() {
+            println!("skyward: begin sends {} bytes, params {}", call.written().len(), params.len());
+            dump("begin parcel", call.written());
+        }
 
         // The decryption the service opens outlives the reply that named
         // it, so take a share of it before the reply's room goes back.
-        let reply = self.device.transact(BEGIN, &call).context("start a decryption")?;
+        let reply = match self.device.transact(BEGIN, &call) {
+            Ok(reply) => reply,
+            Err(e) => {
+                // What the service answers to a call it reads for certain is
+                // the measure of how the ones it refuses were written.
+                if diag_left() {
+                    let mut probe = Message::call(SERVICE);
+                    probe.bytes(key_blob);
+                    probe.bytes(app_id);
+                    probe.bytes(&[]);
+                    match self.device.transact(GET_KEY_CHARACTERISTICS, &probe) {
+                        Ok(answer) => dump("gKC reply", answer.bytes()),
+                        Err(again) => println!("skyward: gKC also refused: {again}"),
+                    }
+                }
+                return Err(e).context("start a decryption");
+            }
+        };
+        if diag_left() {
+            dump("begin reply", reply.bytes());
+        }
         let mut read = Answer::new(reply.bytes());
         read.status().context("start a decryption")?;
         let end = read.structure().context("read what the key service answered")?;
@@ -315,23 +346,34 @@ fn write_parameters(call: &mut Message, params: &[(u32, Value<'_>)]) {
     }
 }
 
-/// The fourth argument of keymaster@3.0 `begin`, the `HardwareAuthToken`, as
-/// the older interface takes it: a structure of its own, with nothing set.
-/// A user whose data is not bound to a screen lock hands over this empty
-/// token, and the secure world unwraps the key under it without a challenge.
-fn token_none(call: &mut Message) {
-    let at = call.structure();
-    call.u8(0); // version: the layout the older token uses
-    call.u8(0); // challenge: none
-    call.u8(0); // user: none
-    call.u8(0); // authenticator: none
-    call.u32(0); // authenticator type: none
-    call.u64(0); // timestamp: the beginning of time
-    // The thirty-two bytes of the signature, written inline in the structure.
-    for _ in 0..32 {
-        call.u8(0);
+/// How many diagnostic dumps are still wanted. The partition is retried every
+/// few hundred milliseconds, and the phone's log has room for a handful.
+static DIAG: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether to write one more diagnostic dump.
+fn diag_left() -> bool {
+    DIAG.fetch_add(1, Ordering::Relaxed) < 12
+}
+
+/// A run of bytes as hexadecimal, for a log that has no room for anything
+/// fancier.
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
     }
-    call.fill(at);
+    out
+}
+
+/// Write a run of bytes to the log, a line at a time so that none of it runs
+/// past what the phone's log keeps.
+fn dump(what: &str, bytes: &[u8]) {
+    let mut at = 0;
+    while at < bytes.len() {
+        let end = (at + 64).min(bytes.len());
+        println!("skyward: {what} [{at}] {}", hex(&bytes[at..end]));
+        at = end;
+    }
 }
 
 /// The note the secure world wrote, as the older interface takes it: the
