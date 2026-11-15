@@ -121,14 +121,18 @@ impl<'a> Keymaster<'a> {
         let reply = self.device.transact(GET_KEY_CHARACTERISTICS, &call).context("ask what the key may be used for")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("ask what the key may be used for")?;
-        let mut out = Vec::new();
-        // What the key may be used for comes as one structure holding two
-        // lists: what software checks, and what the secure world checks.
-        let end = read.structure().context("read what the key may be used for")?;
-        for _ in 0..2 {
-            out.extend(read.parameters().context("read what the key may be used for")?);
+        accepted(read.i32().context("ask what the key may be used for")?, "ask what the key may be used for")?;
+        // What the key may be used for comes as two lists: what software
+        // checks, and what the secure world checks. The header says how long
+        // each of them is.
+        let header = read.pointed().context("read what the key may be used for")?;
+        if header.len() < 32 {
+            bail!("what the key may be used for is {} bytes", header.len());
         }
-        read.go(end).context("step to the end of what the key may be used for")?;
+        let software = u32::from_le_bytes(header[8..12].try_into().expect("four bytes")) as usize;
+        let secure = u32::from_le_bytes(header[24..28].try_into().expect("four bytes")) as usize;
+        let mut out = read.parameters_of(software).context("read what software checks")?;
+        out.extend(read.parameters_of(secure).context("read what the secure world checks")?);
         Ok(out)
     }
 
@@ -202,7 +206,8 @@ impl<'a> Keymaster<'a> {
         let reply = self.device.transact(UPGRADE_KEY, &call).context("renew the key")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("renew the key")?;
-        Ok(read.pointed().context("read the renewed key")?.to_vec())
+        accepted(read.i32().context("renew the key")?, "renew the key")?;
+        read.bytes().context("read the renewed key")
     }
 
     /// Open a decryption with the key service and keep hold of it.
@@ -261,9 +266,8 @@ impl<'a> Keymaster<'a> {
         }
         let mut read = Answer::new(reply.bytes());
         read.status().context("start a decryption")?;
-        let end = read.structure().context("read what the key service answered")?;
+        accepted(read.i32().context("start a decryption")?, "start a decryption")?;
         read.parameters().context("read how the decryption is set up")?;
-        read.go(end).context("step to the end of what the key service answered")?;
         let handle = read.number().context("read the decryption the key service opened")?;
         match handle {
             0 => bail!("the key service opened no decryption"),
@@ -279,13 +283,13 @@ impl<'a> Keymaster<'a> {
         let reply = operation.transact(UPDATE, &call).context("feed the decryption")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("feed the decryption")?;
-        let taken = read.count().context("read how much the decryption took")?;
-        if taken as usize != input.len() {
+        accepted(read.i32().context("feed the decryption")?, "feed the decryption")?;
+        let taken = read.i32().context("read how much the decryption took")? as usize;
+        if taken != input.len() {
             bail!("the decryption took {taken} of the {} bytes it was given", input.len());
         }
-        let end = read.structure().context("read how the decryption is set up")?;
-        read.go(end).context("step to the end of what the decryption answered")?;
-        Ok(read.pointed().context("read what the decryption gave back")?.to_vec())
+        read.parameters().context("read how the decryption is set up")?;
+        read.bytes().context("read what the decryption gave back")
     }
 
     fn finish(&self, operation: &Handle) -> Result<Vec<u8>> {
@@ -297,9 +301,9 @@ impl<'a> Keymaster<'a> {
         let reply = operation.transact(FINISH, &call).context("close the decryption")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("close the decryption, which is where a wrong key is refused")?;
-        let end = read.structure().context("read how the decryption is set up")?;
-        read.go(end).context("step to the end of what the decryption answered")?;
-        Ok(read.pointed().context("read what the decryption ended with")?.to_vec())
+        accepted(read.i32().context("close the decryption")?, "close the decryption")?;
+        read.parameters().context("read how the decryption is set up")?;
+        read.bytes().context("read what the decryption ended with")
     }
 
     /// Whether the secure world will unwrap the key at all: a decryption is
@@ -324,25 +328,55 @@ enum Value<'a> {
     Bytes(&'a [u8]),
 }
 
-/// Write a list of parameters: how many there are, then each as a structure
-/// of its own, so the far side can step over what it does not know.
+/// How long one parameter is in the array a list of them is written as: its
+/// tag, the room the value needs to stand on a boundary of eight, the value
+/// itself, and where the bytes it carries are and how many of them there are.
+const PARAMETER_BYTES: usize = 32;
+
+/// Write a list of parameters the way this interface writes one: the frame
+/// that says where the array is and how many entries it holds, the array with
+/// one record per parameter, and then the bytes each record names.
 ///
-/// A `KeyParameter` on the wire is a structure: a word that says it is there
-/// and a length, then the tag and the value the tag names. A value that is an
-/// enum or a number is written inline in the structure, and one that is bytes
-/// is handed over as its own buffer, the way the binder carries anything
-/// longer than a word. A parameter written any other way makes the far side
-/// read the tag as a length and refuse the whole call with -EINVAL.
+/// A value that is an enumeration or a number stands in the record itself; one
+/// that is bytes is handed over as a buffer of its own and the record says
+/// where it is. A parameter written any other way is read as something else
+/// entirely, and the whole call is refused as though one of its arguments were
+/// wrong.
 fn write_parameters(call: &mut Message, params: &[(u32, Value<'_>)]) {
-    call.u32(params.len() as u32);
+    let mut array = Vec::with_capacity(params.len() * PARAMETER_BYTES);
+    let mut carried = Vec::with_capacity(params.len());
     for (tag, value) in params {
-        let at = call.structure();
-        call.u32(*tag);
-        match value {
-            Value::Enum(v) | Value::Uint(v) => call.u32(*v),
-            Value::Bytes(b) => call.bytes(b),
-        }
-        call.fill(at);
+        let bytes: &[u8] = match value {
+            Value::Enum(_) | Value::Uint(_) => &[],
+            Value::Bytes(b) => b,
+        };
+        let number: u64 = match value {
+            Value::Enum(v) | Value::Uint(v) => u64::from(*v),
+            Value::Bytes(_) => 0,
+        };
+        let length = bytes.len();
+        let at = if length == 0 { 0 } else { call.stash(bytes.to_vec()) };
+        carried.push((at, length));
+        array.extend_from_slice(&tag.to_le_bytes());
+        array.extend_from_slice(&[0; 4]);
+        array.extend_from_slice(&number.to_le_bytes());
+        array.extend_from_slice(&at.to_le_bytes());
+        array.extend_from_slice(&(length as u32).to_le_bytes());
+        array.extend_from_slice(&[0; 4]);
+    }
+    let at = if array.is_empty() { 0 } else { call.stash(array) };
+    let list = call.vec_from(at, params.len(), params.len() * PARAMETER_BYTES);
+    for (index, (at, length)) in carried.into_iter().enumerate() {
+        call.embedded(at, length, list, (index * PARAMETER_BYTES + 16) as u64);
+    }
+}
+
+/// Refuse a call the secure world would not carry out, saying what it said.
+fn accepted(code: i32, what: &str) -> Result<()> {
+    if code == 0 {
+        Ok(())
+    } else {
+        bail!("{what}: the key service answered {code}")
     }
 }
 
