@@ -178,6 +178,32 @@ pub fn report(credential: Option<&str>, user: u32, clean: bool) -> Result<()> {
         return Ok(());
     }
     say("the key service", key_service().map_err(anyhow::Error::msg));
+    // What the service makes of the key the partition is opened with, asked
+    // the way Android's own key store asks it: whether the blob is bound to
+    // the value this reads decides whether the unwrapping can go on at all.
+    if let Ok(stored) = skyward_crypto::keystore::StoredKey::load(std::path::Path::new("/data/unencrypted/key")) {
+        match stored.key_blob() {
+            Some(blob) => {
+                let bound = stored.bound_to(b"");
+                say("the blob the shared key is kept in", Ok(format!("{} bytes", blob.len())));
+                say("what that key is bound to", Ok(format!("{} bytes", bound.len())));
+                if let Ok(hardware) = Binder::hardware() {
+                    if let Ok(service) = Keymaster::open(&hardware) {
+                        for (what, id) in [("with that binding", bound.as_slice()), ("with nothing bound", &[][..])] {
+                            say(
+                                "what the service says of the key",
+                                match service.characteristics(blob, id) {
+                                    Ok(params) => Ok(format!("{what}: it accepts it, {} parameters", params.len())),
+                                    Err(e) => Err(anyhow::anyhow!("{what}: {e:#}")),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            None => say("the blob the shared key is kept in", Err(anyhow::anyhow!("this directory keeps none"))),
+        }
+    }
     say(
         "how the partition is encrypted whole",
         (|| -> Result<String> {
