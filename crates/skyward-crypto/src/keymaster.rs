@@ -27,15 +27,19 @@ const INSTANCE: &str = "default";
 /// numbers them by their order in the interface, which starts at one:
 /// `addRngEntropy` is the first, and `abort` the last.
 const GET_HARDWARE_FEATURES: u32 = 1;
-const GET_KEY_CHARACTERISTICS: u32 = 4;
-const UPGRADE_KEY: u32 = 7;
-// Device-verified on the OPPO A57: the keymaster@3.0 HAL answers begin at 8.
-// 10 reached finish, and one step further would have reached deleteAllKeys.
-// Never re-derive these from the KeyMint/4.0 interface.
-const BEGIN: u32 = 8;
-const UPDATE: u32 = 9;
-const FINISH: u32 = 10;
-const ABORT: u32 = 11;
+// Probed on the OPPO A57 (recovery, serial 79262cd): getKeyCharacteristics
+// answers at code 5 and rejects code 4, so this unit speaks the current
+// keymaster@3.0 vendor interface, where the methods after it are
+// exportKey(6), attestKey(7), upgradeKey(8), deleteKey(9), deleteAllKeys(10),
+// destroyAttestationIds(11), begin(12), update(13), finish(14), abort(15).
+// The previous 4/7/8/9/10/11 numbering was a misrecorded note; with it begin
+// landed on upgradeKey and the call came back -EINVAL (-22).
+const GET_KEY_CHARACTERISTICS: u32 = 5;
+const UPGRADE_KEY: u32 = 8;
+const BEGIN: u32 = 12;
+const UPDATE: u32 = 13;
+const FINISH: u32 = 14;
+const ABORT: u32 = 15;
 
 // The tags, as `android.hardware.keymaster@3.0::Tag` numbers them: the kind
 // of value it carries in the top bits, then its own number. The kind is
@@ -349,12 +353,12 @@ mod tests {
         // The interface lists these in this order, and a phone's own library
         // numbers them from one.
         assert_eq!(GET_HARDWARE_FEATURES, 1);
-        assert_eq!(GET_KEY_CHARACTERISTICS, 4);
-        assert_eq!(UPGRADE_KEY, 7);
-        assert_eq!(BEGIN, 8);
-        assert_eq!(UPDATE, 9);
-        assert_eq!(FINISH, 10);
-        assert_eq!(ABORT, 11);
+        assert_eq!(GET_KEY_CHARACTERISTICS, 5);
+        assert_eq!(UPGRADE_KEY, 8);
+        assert_eq!(BEGIN, 12);
+        assert_eq!(UPDATE, 13);
+        assert_eq!(FINISH, 14);
+        assert_eq!(ABORT, 15);
     }
 
     /// A tag is built out of the kind of value and a number, so it is wider
