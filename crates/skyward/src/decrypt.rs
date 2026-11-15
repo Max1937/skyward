@@ -102,29 +102,11 @@ pub fn with_key_service<T>(work: impl FnOnce(&dyn KeyService) -> Result<T>) -> R
 /// Do `work` with the first key service that answers: the newer kind, then
 /// the older.
 ///
-/// The service is started by the same program that opens the partition, and
-/// comes up a few seconds into the boot, so a recovery that asks once and
-/// gives up finds no key service at all on a phone that is slower to start
-/// one than to ask. Each attempt is made again for as long as the boot takes
-/// to bring the service up.
+/// A handle borrows the driver it was reached through, so each attempt keeps
+/// both for as long as it uses them, and the work is handed over only once a
+/// service has answered something that changes nothing.
 fn try_key_services<T>(work: impl FnOnce(&dyn KeyService) -> Result<T>) -> Result<T> {
     let mut work = Some(work);
-    let mut said = String::new();
-    for attempt in 0..40 {
-        match try_key_services_once(&mut work) {
-            Ok(done) => return Ok(done),
-            Err(e) => said = format!("{e:#}"),
-        }
-        if attempt < 39 {
-            thread::sleep(std::time::Duration::from_millis(400));
-        }
-    }
-    anyhow::bail!("{said}")
-}
-
-/// One attempt at the same, so that a service not yet started costs a wait
-/// rather than the partition.
-fn try_key_services_once<T, F: FnOnce(&dyn KeyService) -> Result<T>>(work: &mut Option<F>) -> Result<T> {
     let mut refusals = Vec::new();
     if let Ok(binder) = Binder::open() {
         if let Ok(service) = KeyMint::open(&binder) {
@@ -239,8 +221,7 @@ pub fn report(credential: Option<&str>, user: u32, clean: bool) -> Result<()> {
         }
     }
     if users.is_empty() {
-        println!("then: no user's keys are on the partition; there is nothing to open");
-        return Ok(());
+        println!("then: no user's own keys are on the partition; the shared key is what opens it");
     }
     let opened = with_key_service(|service| skyward_crypto::data::open_without_credential(service));
     match &opened {
