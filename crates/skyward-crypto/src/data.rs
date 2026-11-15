@@ -254,7 +254,7 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
     }
     let mut closed = Vec::new();
     let mut owner = Note::default();
-    let users = match open_users(service) {
+    let mut users = match open_users(service) {
         Ok(users) => users,
         Err(e) => {
             if !reads_as_it_lies() {
@@ -264,6 +264,14 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
             Vec::new()
         }
     };
+    // A phone that keeps no key for the partition as a whole still keeps one
+    // for each user's own files, and those are the ones that have to open.
+    for user in users_with_own_files() {
+        if !users.contains(&user) {
+            users.push(user);
+        }
+    }
+    users.sort_unstable();
     for user in users {
         let protector = match protector(user) {
             Ok(protector) => protector,
@@ -297,9 +305,26 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
 
 /// Whether what is on the mounted partition reads as it lies: a phone whose
 /// data was never encrypted, or whose key no longer opens it, keeps the
-/// system's own record of its users in plain sight.
+/// record of each user's lock in plain sight.
 fn reads_as_it_lies() -> bool {
-    std::path::Path::new("/data/system/users").is_dir()
+    let system = std::path::Path::new("/data/system_de/0");
+    system.is_dir() || std::path::Path::new("/data/misc/vold/user_keys").is_dir()
+}
+
+/// Which users the phone keeps the keys for their own files for, whether or
+/// not it also keeps a key for the partition as a whole.
+fn users_with_own_files() -> Vec<u32> {
+    let dir = Path::new(USER_KEYS).join("ce");
+    let mut users = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(user) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) {
+                users.push(user);
+            }
+        }
+    }
+    users.sort_unstable();
+    users
 }
 
 /// Open the partition as far as it opens with no key service at all.
@@ -676,16 +701,28 @@ fn open_user_files(service: &dyn KeyService, user: u32, credential: Option<&[u8]
         }
         (Bound::Secdiscardable(secdiscardable), None) => (crate::user::protector_secret(&stretched, secdiscardable), None),
     };
-    let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &protector.key_alias())?;
-    let content = crate::user::content(&protector.blob)?;
-    if content.len() < NONCE_BYTES + TAG_BYTES {
-        anyhow::bail!("the user's blob is too short to hold anything");
-    }
-    let (nonce, body) = content.split_at(NONCE_BYTES);
-    let inner = service
-        .gcm_decrypt_with(&held, &[], nonce, body, note.as_ref())
-        .context("open what the secure world holds the user's blob closed with")?;
-    let synthetic_password = crate::user::open_inner(&secret, &inner)?;
+    // The synthetic password is held behind the value the protector is bound
+    // to: the hash of the blob whose erasure makes it unrecoverable, and the
+    // secret behind the credential. A phone that keeps no key of its own for
+    // the layer around it is opened here directly; one built from Android 12
+    // on keeps that key in its key store, behind the key service, and is
+    // opened the long way round.
+    let synthetic_password = match crate::user::open_inner(&secret, &protector.blob) {
+        Ok(synthetic) => synthetic,
+        Err(direct) => {
+            let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &protector.key_alias())
+                .context("read the key the phone keeps for the user's blob")?;
+            let content = crate::user::content(&protector.blob)?;
+            if content.len() < NONCE_BYTES + TAG_BYTES {
+                anyhow::bail!("the user's blob is too short to hold anything");
+            }
+            let (nonce, body) = content.split_at(NONCE_BYTES);
+            let inner = service
+                .gcm_decrypt_with(&held, &[], nonce, body, note.as_ref())
+                .with_context(|| format!("open what the secure world holds the user's blob closed with, after the shorter way did not: {direct:#}"))?;
+            crate::user::open_inner(&secret, &inner)?
+        }
+    };
     let file_secret = crate::user::file_secret(&synthetic_password);
 
     let wrapped = keys_are_hardware_wrapped()?;
