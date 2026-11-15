@@ -11,6 +11,12 @@ pub const DATABASE: &str = "/data/misc/keystore/persistent.sqlite";
 /// The kind of thing a row holds: the key itself rather than a certificate.
 const KEY_BLOB: i64 = 0;
 
+/// Android 12 and later wrap each blob the key service keeps in this
+/// eight-byte header. The keymaster HAL was given the blob before it was
+/// wrapped, and refuses the wrapper as an invalid key blob; a recovery has
+/// to take the header back off before asking it to begin an operation.
+const PKM_BLOB_PREFIX: &[u8] = b"pKMblob\0";
+
 /// The handle the secure world knows the key named `alias` by. The
 /// database is opened as it lies, without being written to or waiting on
 /// anyone, since the phone it belongs to is not running.
@@ -29,5 +35,9 @@ pub fn key_blob(database: &Path, alias: &str) -> Result<Vec<u8>> {
         .next()
         .with_context(|| format!("read what {} says about {alias}", database.display()))?
         .with_context(|| format!("{} holds no key named {alias}", database.display()))?;
-    row.get(0).with_context(|| format!("read the key named {alias}"))
+    let blob: Vec<u8> = row.get(0).with_context(|| format!("read the key named {alias}"))?;
+    Ok(match blob.strip_prefix(PKM_BLOB_PREFIX) {
+        Some(unwrapped) => unwrapped.to_vec(),
+        None => blob,
+    })
 }
