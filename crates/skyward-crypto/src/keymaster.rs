@@ -123,6 +123,30 @@ impl<'a> Keymaster<'a> {
         Ok(out)
     }
 
+    /// Ask the service to mix in entropy, which changes nothing a key
+    /// depends on, and say how the call went. The method is the second one
+    /// the interface lists, so its number is the same in every revision of
+    /// it: a clean answer means the calls are written the way this service
+    /// reads them, and a refusal means they are not.
+    pub fn probe(&self) -> String {
+        const ADD_RNG_ENTROPY: u32 = 2;
+        let mut call = Message::call(SERVICE);
+        call.bytes(&[0u8; 32]);
+        match self.device.transact(ADD_RNG_ENTROPY, &call) {
+            Ok(reply) => {
+                let mut read = Answer::new(reply.bytes());
+                match read.status() {
+                    Ok(()) => match read.i32() {
+                        Ok(code) => format!("entropy taken, the service answered {code}"),
+                        Err(e) => format!("entropy taken, the answer could not be read: {e:#}"),
+                    },
+                    Err(e) => format!("the service refused: {e:#}"),
+                }
+            }
+            Err(e) => format!("the call itself failed: {e:#}"),
+        }
+    }
+
     /// Undo an AES-GCM encryption the service did with `key_blob`. The
     /// service only hands back the plaintext when `app_id` is the one the
     /// key was made for, so a wrong secret fails here rather than yielding
