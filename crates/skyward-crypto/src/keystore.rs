@@ -25,6 +25,12 @@ const FN_KEY_BLOB: &str = "keymaster_key_blob";
 const FN_SECDISCARDABLE: &str = "secdiscardable";
 const FN_STRETCHING: &str = "stretching";
 
+/// Android 12 and later wrap a key blob in this eight-byte keystore header.
+/// The keymaster HAL was given the blob before it was wrapped, and rejects
+/// the wrapper as an invalid key blob; recovery has to take it back off
+/// before asking the HAL to begin an operation.
+const PKM_BLOB_PREFIX: &[u8] = b"pKMblob\0";
+
 /// SHA-512 of `data` behind a fixed prefix.
 pub fn hash_with_prefix(prefix: &[u8], data: &[u8]) -> Vec<u8> {
     let mut padded = prefix.to_vec();
@@ -77,7 +83,13 @@ impl StoredKey {
             false => Vec::new(),
         };
         let key_blob = match dir.join(FN_KEY_BLOB).exists() {
-            true => Some(read(FN_KEY_BLOB)?),
+            true => {
+                let mut blob = read(FN_KEY_BLOB)?;
+                if blob.starts_with(PKM_BLOB_PREFIX) {
+                    blob.drain(..PKM_BLOB_PREFIX.len());
+                }
+                Some(blob)
+            }
             false => None,
         };
         Ok(StoredKey { encrypted: read(FN_ENCRYPTED_KEY)?, key_blob, secdiscardable_hash })
