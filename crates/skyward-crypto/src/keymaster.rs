@@ -86,6 +86,12 @@ pub struct Features {
     pub algorithms: Vec<u32>,
 }
 
+/// A cryptographic operation the service has opened. `OperationHandle` in
+/// `keymaster@3.0` is an opaque 64-bit number, not an object on the binder:
+/// update, finish and abort are methods of the same device, and take the
+/// number as their first argument.
+type Operation = u64;
+
 /// The phone's key service, as this program talks to it.
 pub struct Keymaster<'a> {
     device: Handle<'a>,
@@ -193,8 +199,8 @@ impl<'a> Keymaster<'a> {
     /// takes the note the secure world wrote when it was answered.
     pub fn gcm_decrypt(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], body: &[u8], note: Option<&Token>) -> Result<Vec<u8>> {
         let operation = self.begin(key_blob, app_id, nonce, note)?;
-        let mut out = self.update(&operation, body)?;
-        out.extend_from_slice(&self.finish(&operation)?);
+        let mut out = self.update(operation, body)?;
+        out.extend_from_slice(&self.finish(operation)?);
         Ok(out)
     }
 
@@ -218,7 +224,7 @@ impl<'a> Keymaster<'a> {
     /// purpose, the key, and the parameters. There is no fourth argument: a
     /// note the secure world wrote, when the key is bound to a screen lock,
     /// travels among the parameters, tagged as one.
-    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Handle<'a>> {
+    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Operation> {
         let token = note.map(token_bytes);
         let mut params = vec![
             (TAG_BLOCK_MODE, Value::Enum(BLOCK_MODE_GCM)),
@@ -243,26 +249,10 @@ impl<'a> Keymaster<'a> {
             dump("begin parcel", call.written());
         }
 
-        // The decryption the service opens outlives the reply that named
-        // it, so take a share of it before the reply's room goes back.
-        let reply = match self.device.transact(BEGIN, &call) {
-            Ok(reply) => reply,
-            Err(e) => {
-                // What the service answers to a call it reads for certain is
-                // the measure of how the ones it refuses were written.
-                if diag_left() {
-                    let mut probe = Message::call(SERVICE);
-                    probe.bytes(key_blob);
-                    probe.bytes(app_id);
-                    probe.bytes(&[]);
-                    match self.device.transact(GET_KEY_CHARACTERISTICS, &probe) {
-                        Ok(answer) => dump("gKC reply", answer.bytes()),
-                        Err(again) => println!("skyward: gKC also refused: {again}"),
-                    }
-                }
-                return Err(e).context("start a decryption");
-            }
-        };
+        // The service opens an operation on itself and names it with a
+        // 64-bit number. There is no object to take a share of: update,
+        // finish and abort go back to this same device with the number.
+        let reply = self.device.transact(BEGIN, &call).context("start a decryption")?;
         if diag_left() {
             dump("begin reply", reply.bytes());
         }
@@ -273,16 +263,16 @@ impl<'a> Keymaster<'a> {
         let handle = read.number().context("read the decryption the key service opened")?;
         match handle {
             0 => bail!("the key service opened no decryption"),
-            h => Ok(Handle::hold(reply.binder(), u32::try_from(h).context("the decryption's number")?)?),
+            h => Ok(h),
         }
     }
 
-    fn update(&self, operation: &Handle, input: &[u8]) -> Result<Vec<u8>> {
+    fn update(&self, operation: Operation, input: &[u8]) -> Result<Vec<u8>> {
         let mut call = Message::call(SERVICE);
-        call.u64(operation.number() as u64);
+        call.u64(operation);
         write_parameters(&mut call, &[]);
         call.bytes(input);
-        let reply = operation.transact(UPDATE, &call).context("feed the decryption")?;
+        let reply = self.device.transact(UPDATE, &call).context("feed the decryption")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("feed the decryption")?;
         accepted(read.i32().context("feed the decryption")?, "feed the decryption")?;
@@ -294,13 +284,13 @@ impl<'a> Keymaster<'a> {
         read.bytes().context("read what the decryption gave back")
     }
 
-    fn finish(&self, operation: &Handle) -> Result<Vec<u8>> {
+    fn finish(&self, operation: Operation) -> Result<Vec<u8>> {
         let mut call = Message::call(SERVICE);
-        call.u64(operation.number() as u64);
+        call.u64(operation);
         write_parameters(&mut call, &[]);
         call.bytes(&[]);
         call.bytes(&[]);
-        let reply = operation.transact(FINISH, &call).context("close the decryption")?;
+        let reply = self.device.transact(FINISH, &call).context("close the decryption")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("close the decryption, which is where a wrong key is refused")?;
         accepted(read.i32().context("close the decryption")?, "close the decryption")?;
@@ -315,8 +305,8 @@ impl<'a> Keymaster<'a> {
     pub fn usable(&self, key_blob: &[u8], app_id: &[u8]) -> Result<()> {
         let operation = self.begin(key_blob, app_id, &[0; NONCE_BYTES], None)?;
         let mut call = Message::call(SERVICE);
-        call.u64(operation.number() as u64);
-        let reply = operation.transact(ABORT, &call).context("drop the decryption")?;
+        call.u64(operation);
+        let reply = self.device.transact(ABORT, &call).context("drop the decryption")?;
         Answer::new(reply.bytes()).status().context("drop the decryption")
     }
 }
