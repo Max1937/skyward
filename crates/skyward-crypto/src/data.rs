@@ -241,22 +241,65 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
         true => None,
         false => Some(open(service)?),
     };
-    open_shared(service)?;
+    // The partition's own key is unwrapped when the phone still has the one
+    // that opens it. A phone whose data was never encrypted, or whose key no
+    // longer opens it, still mounts, and what is on it is then read as it
+    // lies: that is what a recovery is for, and what the phone's own
+    // installer shows of the same partition.
+    if let Err(e) = open_shared(service) {
+        if !reads_as_it_lies() {
+            return Err(e).context("open the key the data partition is wrapped in");
+        }
+        println!("skyward: the key that wraps the data partition does not open it, and what is on it reads as it lies: {e:#}");
+    }
     let mut closed = Vec::new();
     let mut owner = Note::default();
-    for user in open_users(service)? {
-        let protector = protector(user)?;
-        match protector.lock {
-            None => {
-                let note = open_user_files(service, user, None, None)?;
-                if user == OWNER {
-                    owner = note;
-                }
+    let users = match open_users(service) {
+        Ok(users) => users,
+        Err(e) => {
+            if !reads_as_it_lies() {
+                return Err(e).context("open the keys of the users' own files");
             }
+            println!("skyward: the users' own keys do not open, and their files read as they lie: {e:#}");
+            Vec::new()
+        }
+    };
+    for user in users {
+        let protector = match protector(user) {
+            Ok(protector) => protector,
+            Err(e) => {
+                if reads_as_it_lies() {
+                    println!("skyward: what user {user}'s lock keeps does not read, and their files read as they lie: {e:#}");
+                    continue;
+                }
+                return Err(e);
+            }
+        };
+        match protector.lock {
+            None => match open_user_files(service, user, None, None) {
+                Ok(note) => {
+                    if user == OWNER {
+                        owner = note;
+                    }
+                }
+                Err(e) => {
+                    if !reads_as_it_lies() {
+                        return Err(e);
+                    }
+                    println!("skyward: user {user}'s own files read as they lie: {e:#}");
+                }
+            },
             Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
         }
     }
     Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
+}
+
+/// Whether what is on the mounted partition reads as it lies: a phone whose
+/// data was never encrypted, or whose key no longer opens it, keeps the
+/// system's own record of its users in plain sight.
+fn reads_as_it_lies() -> bool {
+    std::path::Path::new("/data/system/users").is_dir()
 }
 
 /// Open the own files of `user` with what they typed at their screen lock
