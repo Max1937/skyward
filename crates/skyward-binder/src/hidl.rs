@@ -97,6 +97,21 @@ impl Message {
         self.data[mark..mark + 4].copy_from_slice(&length.to_le_bytes());
     }
 
+    /// A single byte, written as it is. The binder steps over nothing after
+    /// it: whatever comes next lands where this leaves off, so a run of bytes
+    /// that makes up a structure's own fields is written one after another.
+    pub fn u8(&mut self, byte: u8) {
+        self.data.push(byte);
+    }
+
+    /// Open a structure: a word that says it is there and a length to be
+    /// filled in once its fields are written. The answer is the place the
+    /// length goes, for [`Message::fill`].
+    pub fn structure(&mut self) -> usize {
+        self.u32(1);
+        self.mark()
+    }
+
     /// Hold on to bytes the driver will read, and say where they are, so a
     /// structure whose pointer to them is written before the object that
     /// carries them can still name them.
