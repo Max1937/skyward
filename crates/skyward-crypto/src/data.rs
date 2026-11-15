@@ -91,12 +91,15 @@ fn hardware_key(service: &dyn KeyService, dir: &Path, wrapped: bool) -> Result<V
     // it was started on may keep either.
     let key = match stored.unwrap(Unwrap::Hardware(service)) {
         Ok(key) => key,
-        Err(e) => stored.unwrap(Unwrap::<dyn KeyService>::Secret(&[])).with_context(|| {
-            format!(
-                "unwrap the key in {}, which the secure world would not ({e:#}), by its binding",
-                dir.display()
-            )
-        })?,
+        Err(e) => match stored.unwrap(Unwrap::<dyn KeyService>::Secret(&[])) {
+            Ok(key) => key,
+            Err(by_binding) => stored.unwrap_by(&[]).with_context(|| {
+                format!(
+                    "unwrap the key in {}, which the secure world would not ({e:#}), neither by its binding ({by_binding:#}) nor by nothing at all",
+                    dir.display()
+                )
+            })?,
+        },
     };
     match wrapped {
         true => service.ephemeral_storage_key(&key).with_context(|| format!("make the key in {} usable now", dir.display())),
