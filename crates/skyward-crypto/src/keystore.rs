@@ -118,6 +118,18 @@ impl StoredKey {
         service.authorizations(blob, &self.app_id(&[]))
     }
 
+    /// The key itself, opened by the value given rather than by the key
+    /// service: what a phone that keeps its key in software wraps it with.
+    /// The value is the whole of what the wrapping is bound to, not a secret
+    /// added to the directory's own binding.
+    pub fn unwrap_by(&self, pre_key: &[u8]) -> Result<Vec<u8>> {
+        if self.encrypted.len() < NONCE_BYTES + TAG_BYTES {
+            bail!("the wrapped key is {} bytes, too few to hold anything", self.encrypted.len());
+        }
+        let (nonce, body) = self.encrypted.split_at(NONCE_BYTES);
+        decrypt_with_secret(pre_key, nonce, body)
+    }
+
     /// The key itself.
     pub fn unwrap<K: Decryptor + ?Sized>(&self, how: Unwrap<K>) -> Result<Vec<u8>> {
         if self.encrypted.len() < NONCE_BYTES + TAG_BYTES {
