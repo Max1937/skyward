@@ -328,11 +328,7 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
 /// data was never encrypted, or whose key no longer opens it, keeps the
 /// record of each user's lock in plain sight, under the names the phone gave
 /// those files rather than under names encrypted with a key.
-#[allow(unreachable_code)]
 fn reads_as_it_lies() -> bool {
-    // TEMPORARY: let every refusal reach the page, so the log names which
-    // of the users' keys will not open. Restore once they all do.
-    return false;
     let spblob = std::fs::read_dir("/data/system_de/0/spblob")
         .map(|entries| entries.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".spblob")))
         .unwrap_or(false);
@@ -508,9 +504,13 @@ fn open_shared(service: &dyn KeyService) -> Result<Option<[u8; crate::fscrypt::N
     let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
     let raw = hardware_key(service, Path::new(SHARED_KEY), wrapped)?;
     let name = crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming()?)?;
-    let recorded = crate::fscrypt::recorded_name(Path::new(SHARED_NAME))?;
-    if name != recorded {
-        anyhow::bail!("the key in {SHARED_KEY} is not the one {SHARED_NAME} names");
+    // The older kind of policy names a key by an eight-byte descriptor and
+    // the newer by a sixteen-byte identifier. The phone writes down whichever
+    // of the two it used, at that length; the kernel's answer begins with the
+    // same bytes. Comparing a fixed sixteen bytes rejects every v1 phone.
+    let recorded = std::fs::read(SHARED_NAME).with_context(|| format!("read {SHARED_NAME}"))?;
+    if recorded.is_empty() || recorded.len() > name.len() || name[..recorded.len()] != recorded[..] {
+        anyhow::bail!("the key in {SHARED_KEY} is not the one {SHARED_NAME} names ({} bytes against {})", name.len(), recorded.len());
     }
     Ok(Some(name))
 }
