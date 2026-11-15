@@ -157,6 +157,16 @@ pub fn prepare_hardware_directory(wanted: &[String], newer: &[String]) -> Result
     // description, and a run of it before this was written may have left
     // that behind.
     skyward_sys::set_prop(DIRECTORY_OFF, "false")?;
+    // The newer directory, which the services of the newer kind register
+    // with, reads its description once as it starts, and the recovery's own
+    // started before this was written: have it start again so that such a
+    // service is declared before it registers. Verified on the A57: until
+    // this, android.hardware.wifi.supplicant.ISupplicant/default was refused
+    // as undeclared even though the description named it.
+    if skyward_sys::prop("init.svc.servicemanager").is_some() {
+        let _ = skyward_sys::set_prop("ctl.restart", "servicemanager");
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
     Ok(())
 }
 
