@@ -302,6 +302,33 @@ fn reads_as_it_lies() -> bool {
     std::path::Path::new("/data/system/users").is_dir()
 }
 
+/// Open the partition as far as it opens with no key service at all.
+///
+/// A phone that encrypts each user's files only mounts without one, and one
+/// whose data reads as it lies needs none to read it. A phone whose partition
+/// is wrapped as a whole needs the service, and this says so rather than
+/// mount what it cannot read.
+pub fn open_without_keys() -> Result<Opening> {
+    if !reads_as_it_lies() {
+        anyhow::bail!("the data partition is wrapped in a key, and no key service answered");
+    }
+    let mounted = match mount::is_mount_point(Path::new(MOUNT))? {
+        true => None,
+        false => {
+            let entries = skyward_block::fstab::read(MOUNT)?;
+            let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
+            let device = skyward_block::fstab::device(entry)?;
+            if Encryption::of(entry)?.is_some() {
+                anyhow::bail!("the data partition is wrapped as a whole, and no key service answered");
+            }
+            std::fs::create_dir_all(MOUNT).with_context(|| format!("make {MOUNT}"))?;
+            mount::mount(Path::new(&device), Path::new(MOUNT), &entry.filesystem, &entry.options)?;
+            Some(Opened { mapped: PathBuf::from(device), filesystem: entry.filesystem.clone(), checked: None })
+        }
+    };
+    Ok(Opening { mounted, closed: Vec::new() })
+}
+
 /// Open the own files of `user` with what they typed at their screen lock
 /// and, where `user` is the owner, of each of `closed` whose credential
 /// the phone made up behind theirs; give those still closed.
