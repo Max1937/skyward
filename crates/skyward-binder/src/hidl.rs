@@ -30,6 +30,11 @@ const OBJECT_BYTES: usize = 24;
 /// are, how many there are, and whether whoever holds it frees them.
 const FRAME_BYTES: usize = 16;
 
+/// How long one `KeyParameter` is in the array a list of them is written as:
+/// its tag, the room the value needs to stand on a boundary of eight, the
+/// value itself, and where the bytes it carries are and how many.
+const PARAMETER_BYTES: usize = 32;
+
 /// What the driver sets aside and copies for an address is rounded up to a
 /// whole word, which is what the call says it needs room for.
 const WORD: u64 = 8;
@@ -286,28 +291,49 @@ impl<'a> Answer<'a> {
         Ok(())
     }
 
-    /// A list of key parameters, each a structure of its own: a tag, and
-    /// the value that came with it.
+    /// A list of key parameters, as `vec<KeyParameter>` is written: the frame
+    /// that says where the array is and how many entries it holds, and then
+    /// the array itself with one fixed-size record per parameter.
     pub fn parameters(&mut self) -> Result<Vec<Parameter>> {
-        let mut out = Vec::new();
-        let count = self.count().context("read how many parameters there are")?;
+        let frame = self.pointed().context("read the list of parameters")?;
+        if frame.len() < FRAME_BYTES {
+            bail!("a list of parameters says it is {} bytes", frame.len());
+        }
+        let count = u32::from_le_bytes(frame[8..12].try_into().expect("four bytes")) as usize;
+        self.parameters_of(count)
+    }
+
+    /// `count` key parameters whose array comes next, and whose bytes follow
+    /// it: one record per parameter, holding its tag, its number, and where
+    /// and how long the bytes it carries are.
+    pub fn parameters_of(&mut self, count: usize) -> Result<Vec<Parameter>> {
+        let array = self.pointed().context("read the parameters themselves")?;
+        let needed = count.saturating_mul(PARAMETER_BYTES);
+        if array.len() < needed {
+            bail!("the parameters are {} bytes, fewer than the {needed} of {count} of them", array.len());
+        }
+        let mut carried = Vec::with_capacity(count);
         for _ in 0..count {
-            let end = self.structure().context("read a parameter")?;
-            let tag = self.count().context("read what a parameter is tagged with")?;
-            let parameter = match tag >> 28 {
-                // An enumeration, an integer, a truth value and a
-                // repeatable number are all one word.
-                1 | 2 | 3 | 4 | 7 => Parameter { tag: tag & 0x0fff_ffff, number: Some(self.i32()? as i64), bytes: None },
+            carried.push(self.pointed().context("read what a parameter carries")?);
+        }
+        let mut out = Vec::with_capacity(count);
+        for (index, bytes) in carried.into_iter().enumerate() {
+            let at = index * PARAMETER_BYTES;
+            let tag = u32::from_le_bytes(array[at..at + 4].try_into().expect("four bytes"));
+            let number = &array[at + 8..at + 16];
+            let (value, carried) = match tag >> 28 {
+                // An enumeration, an integer, a truth value and a repeatable
+                // number are all one word.
+                1 | 2 | 3 | 4 | 7 => (Some(u32::from_le_bytes(number[..4].try_into().expect("four bytes")) as i64), None),
                 // A long or a date is two.
-                5 | 6 | 10 => Parameter { tag: tag & 0x0fff_ffff, number: Some(self.number()? as i64), bytes: None },
-                // A big number is its length and then its digits.
-                8 => Parameter { tag: tag & 0x0fff_ffff, number: Some(self.pointed()?.len() as i64), bytes: None },
+                5 | 6 | 10 => (Some(u64::from_le_bytes(number.try_into().expect("eight bytes")) as i64), None),
+                // A big number is its length.
+                8 => (Some(bytes.len() as i64), None),
                 // Bytes are a run of them.
-                9 => Parameter { tag: tag & 0x0fff_ffff, number: None, bytes: Some(self.pointed()?.to_vec()) },
+                9 => (None, Some(bytes.to_vec())),
                 other => bail!("a parameter is tagged {other:#x}, which is no kind of value"),
             };
-            self.go(end).context("step to the end of a parameter")?;
-            out.push(parameter);
+            out.push(Parameter { tag: tag & 0x0fff_ffff, number: value, bytes: carried });
         }
         Ok(out)
     }
