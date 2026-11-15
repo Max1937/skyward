@@ -240,19 +240,22 @@ enum Value<'a> {
     Bytes(&'a [u8]),
 }
 
-/// Write a list of parameters: how many there are, then each as a structure
-/// of its own, so that the far side can step over what it does not know.
+/// Write a list of parameters: how many there are, then each as the two
+/// members it is, the tag and then what the tag says the value is.
+///
+/// Nothing goes in front of a parameter. Each one is a `KeyParameter`,
+/// which the interface writes as its tag and then the arm the tag names, one
+/// after another with no length of its own; a length written here is read as
+/// the tag, and a tag that is not one of the interface's makes the far side
+/// refuse the whole call with -EINVAL.
 fn write_parameters(call: &mut Message, params: &[(u32, Value<'_>)]) {
     call.u32(params.len() as u32);
     for (tag, value) in params {
-        let at = call.mark();
-        call.u32(0);
         call.u32(*tag);
         match value {
             Value::Enum(v) | Value::Uint(v) => call.u32(*v),
             Value::Bytes(b) => call.bytes(b),
         }
-        call.fill(at);
     }
 }
 
