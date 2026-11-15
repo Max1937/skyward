@@ -328,7 +328,11 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
 /// data was never encrypted, or whose key no longer opens it, keeps the
 /// record of each user's lock in plain sight, under the names the phone gave
 /// those files rather than under names encrypted with a key.
+#[allow(unreachable_code)]
 fn reads_as_it_lies() -> bool {
+    // TEMPORARY: let every refusal reach the page, so the log names which
+    // of the users' keys will not open. Restore once they all do.
+    return false;
     let spblob = std::fs::read_dir("/data/system_de/0/spblob")
         .map(|entries| entries.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".spblob")))
         .unwrap_or(false);
