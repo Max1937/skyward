@@ -86,8 +86,15 @@ impl StoredKey {
     /// What the wrapping is bound to: the directory's own hash and whatever
     /// secret guards it. A wrong secret gives a wrong binding, and the
     /// unwrapping fails rather than producing a key that looks usable.
+    ///
+    /// `SKYWARD_APP_ID=none` leaves the binding out, which is what a phone
+    /// that made the key without one expects; it is a way to ask the secure
+    /// world which of the two it wants, not something to leave in.
     fn app_id(&self, secret: &[u8]) -> Vec<u8> {
-        let mut id = self.secdiscardable_hash.clone();
+        let mut id = match std::env::var("SKYWARD_APP_ID").as_deref() {
+            Ok("none") => Vec::new(),
+            _ => self.secdiscardable_hash.clone(),
+        };
         id.extend_from_slice(secret);
         id
     }
