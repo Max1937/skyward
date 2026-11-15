@@ -69,6 +69,14 @@ impl Message {
         self.data.extend_from_slice(&v.to_le_bytes());
     }
 
+    /// Pad the values written so far up to `to` bytes, which is where a
+    /// structure puts a member wider than a word.
+    pub fn pad_to(&mut self, to: usize) {
+        while self.data.len() % to != 0 {
+            self.data.push(0);
+        }
+    }
+
     /// A 64-bit number, written where the value before it ended: the
     /// phone's own writer puts nothing in front of a value, whatever its
     /// width, and its reader takes each one where the last left off.
