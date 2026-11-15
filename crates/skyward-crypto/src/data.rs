@@ -18,6 +18,19 @@ use skyward_block::fstab::Entry;
 use skyward_block::{dm, mount};
 use std::path::{Path, PathBuf};
 
+/// Say something where it can be read even from a recovery: the kernel's
+/// own log. The ordinary `println!` of this crate goes nowhere on a phone.
+#[cfg(target_os = "android")]
+fn tell(line: impl std::fmt::Display) {
+    use std::io::Write;
+    if let Ok(mut log) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
+        let _ = writeln!(log, "skyward: data: {line}");
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn tell(_: impl std::fmt::Display) {}
+
 /// Where the data partition is mounted, and the name its decrypted form is
 /// given among the device-mapper's devices.
 pub const MOUNT: &str = "/data";
@@ -263,22 +276,22 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
     // lies: that is what a recovery is for, and what the phone's own
     // installer shows of the same partition.
     if let Err(e) = open_shared(service) {
-        println!("skyward: could not open the key the data partition is wrapped in: {e:#}");
+        tell(format_args!("could not open the key the data partition is wrapped in: {e:#}"));
         if !reads_as_it_lies() {
             return Err(e).context("open the key the data partition is wrapped in");
         }
-        println!("skyward: the key that wraps the data partition does not open it, and what is on it reads as it lies: {e:#}");
+    } else {
+        tell("the key the data partition is wrapped in is in");
     }
     let mut closed = Vec::new();
     let mut owner = Note::default();
     let mut users = match open_users(service) {
         Ok(users) => users,
         Err(e) => {
-            println!("skyward: could not open the keys of the users' own files: {e:#}");
+            tell(format_args!("could not open the keys of the users' own files: {e:#}"));
             if !reads_as_it_lies() {
                 return Err(e).context("open the keys of the users' own files");
             }
-            println!("skyward: the users' own keys do not open, and their files read as they lie: {e:#}");
             Vec::new()
         }
     };
@@ -290,14 +303,13 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
         }
     }
     users.sort_unstable();
-    println!("skyward: the users whose own files are still closed: {users:?} (from keys: {:?})", users_with_own_files());
+    tell(format_args!("users from de keys {users:?}, from ce keys {:?}", users_with_own_files()));
     for user in users {
         let protector = match protector(user) {
             Ok(protector) => protector,
             Err(e) => {
-                println!("skyward: user {user}'s own secret does not read: {e:#}");
+                tell(format_args!("user {user}'s own secret does not read: {e:#}"));
                 if reads_as_it_lies() {
-                    println!("skyward: what user {user}'s lock keeps does not read, and their files read as they lie: {e:#}");
                     continue;
                 }
                 return Err(e);
@@ -306,19 +318,22 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
         match protector.lock {
             None => match open_user_files(service, user, None, None) {
                 Ok(note) => {
+                    tell(format_args!("user {user}'s own files are open"));
                     if user == OWNER {
                         owner = note;
                     }
                 }
                 Err(e) => {
-                    println!("skyward: user {user}'s own files did not open: {e:#}");
+                    tell(format_args!("user {user}'s own files did not open: {e:#}"));
                     if !reads_as_it_lies() {
                         return Err(e);
                     }
-                    println!("skyward: user {user}'s own files read as they lie: {e:#}");
                 }
             },
-            Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
+            Some(lock) => {
+                tell(format_args!("user {user} has a lock of kind {:?}", lock.kind));
+                closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None });
+            }
         }
     }
     Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
