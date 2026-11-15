@@ -17,7 +17,7 @@
 use crate::token::Token;
 use anyhow::{bail, Context, Result};
 use skyward_binder::driver::{Binder, Handle};
-use skyward_binder::hidl::{self, Answer, Bytes, Message, Parameter, Value};
+use skyward_binder::hidl::{self, Answer, Message, Parameter};
 
 /// The hardware service, and the instance it serves as.
 pub const SERVICE: &str = "android.hardware.keymaster@3.0::IKeymasterDevice";
