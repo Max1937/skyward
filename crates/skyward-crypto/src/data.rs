@@ -726,7 +726,9 @@ fn open_user_files(service: &dyn KeyService, user: u32, credential: Option<&[u8]
     // the layer around it is opened here directly; one built from Android 12
     // on keeps that key in its key store, behind the key service, and is
     // opened the long way round.
-    let synthetic_password = match crate::user::open_inner(&secret, &protector.blob) {
+    let synthetic_password = match crate::user::content(&protector.blob)
+        .and_then(|content| crate::user::open_inner(&secret, content))
+    {
         Ok(synthetic) => synthetic,
         Err(direct) => {
             let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &protector.key_alias())
