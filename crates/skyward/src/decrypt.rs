@@ -45,7 +45,7 @@ impl Decryptor {
             .name("decrypt".into())
             .spawn(move || {
                 let ended_as = match job {
-                    Job::Open => Ended::Opened(with_key_service(data::open_without_credential)),
+                    Job::Open => Ended::Opened(open_the_partition()),
                     Job::Unlock { closed, user, credential } => {
                         Ended::Unlocked(with_key_service(|service| data::unlock(service, &closed, user, &credential)))
                     }
@@ -77,6 +77,23 @@ impl Drop for Decryptor {
         if let Some(thread) = self.thread.take() {
             thread.join().expect("the decrypting thread does not panic");
         }
+    }
+}
+
+/// Open the partition, with the key service when the phone has one to answer,
+/// and without it when what is on the partition reads as it lies and so needs
+/// none: a recovery asked for its data partition at the start of a boot is
+/// asking before the phone's own key service has been started at all.
+fn open_the_partition() -> Result<skyward_crypto::data::Opening, String> {
+    match with_key_service(skyward_crypto::data::open_without_credential) {
+        Ok(opened) => Ok(opened),
+        Err(why) => match skyward_crypto::data::open_without_keys() {
+            Ok(opened) => {
+                println!("skyward: the key service did not answer, and the partition reads as it lies, so it is mounted: {why}");
+                Ok(opened)
+            }
+            Err(_) => Err(why),
+        },
     }
 }
 
