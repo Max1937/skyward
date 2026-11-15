@@ -150,7 +150,11 @@ impl<'a> Keymaster<'a> {
 
     /// Open a decryption with the key service and keep hold of it.
     fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Handle<'a>> {
-        let _ = note; // KM3 begin() takes no authToken; the newer interface does.
+        // begin() is the one method of this interface that still takes the
+        // note: update() and finish() lost theirs in the newer interface, but
+        // here it is the fourth argument, and leaving it out makes the far
+        // side read past the parcel and refuse the whole call.
+        let token = note.map(token_bytes).unwrap_or_default();
         let mut params = vec![
             (TAG_BLOCK_MODE, Value::Enum(BLOCK_MODE_GCM)),
             (TAG_PADDING, Value::Enum(PADDING_NONE)),
@@ -166,6 +170,7 @@ impl<'a> Keymaster<'a> {
         call.u32(PURPOSE_DECRYPT);
         call.bytes(key_blob);
         write_parameters(&mut call, &params);
+        call.bytes(&token);
 
         // The decryption the service opens outlives the reply that named
         // it, so take a share of it before the reply's room goes back.
