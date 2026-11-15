@@ -38,9 +38,11 @@ load = []
 [firmware]
 partition = "modem"
 
-# The WCNSS chip is an old prima/wcnss part: its WLAN driver is built into
-# the kernel (there is no wlan.ko to load), and wpa_supplicant talks to it
-# over WEXT rather than nl80211. wcnss_service (started below) opens
+# The WCNSS chip is an old prima/wcnss part whose WLAN driver is built into
+# the kernel (there is no wlan.ko to load). The driver registers a wiphy
+# (/sys/class/ieee80211/phy1), and the phone's own wpa_supplicant is built
+# with nl80211 alone: given -Dwext it exits 255 without a word, so the
+# supplicant is started with -Dnl80211. wcnss_service (started below) opens
 # /dev/wcnss_ctrl, which boots pronto and downloads the NV calibration
 # image; the WLAN thread then waits for wlan0 and starts the supplicant.
 [wlan]
@@ -63,7 +65,7 @@ firmware = [
 interface = "wlan0"
 supplicant = "/vendor/bin/hw/wpa_supplicant"
 libraries = ["/system/lib64", "/vendor/lib64"]
-driver = "wext"
+driver = "nl80211"
 service = "android.hardware.wifi.supplicant.ISupplicant/default"
 probe = "http://connect.rom.miui.com/generate_204"
 
