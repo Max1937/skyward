@@ -130,6 +130,7 @@ impl<'a> Keymaster<'a> {
     /// reads them, and a refusal means they are not.
     pub fn probe(&self) -> String {
         const ADD_RNG_ENTROPY: u32 = 2;
+        let mut said = String::new();
         let mut call = Message::call(SERVICE);
         call.bytes(&[0u8; 32]);
         match self.device.transact(ADD_RNG_ENTROPY, &call) {
@@ -137,14 +138,37 @@ impl<'a> Keymaster<'a> {
                 let mut read = Answer::new(reply.bytes());
                 match read.status() {
                     Ok(()) => match read.i32() {
-                        Ok(code) => format!("entropy taken, the service answered {code}"),
-                        Err(e) => format!("entropy taken, the answer could not be read: {e:#}"),
+                        Ok(code) => said.push_str(&format!("entropy={code}")),
+                        Err(e) => said.push_str(&format!("entropy unreadable {e:#}")),
                     },
-                    Err(e) => format!("the service refused: {e:#}"),
+                    Err(e) => said.push_str(&format!("entropy refused {e:#}")),
                 }
             }
-            Err(e) => format!("the call itself failed: {e:#}"),
+            Err(e) => said.push_str(&format!("entropy failed {e:#}")),
         }
+        // The same call shape as getKeyCharacteristics: three runs of bytes,
+        // changing nothing. It is the fifth method of the interface as the
+        // current definition lists it, and the fourth as the older one did.
+        for code in [5u32, 4u32] {
+            let mut call = Message::call(SERVICE);
+            call.bytes(&[]);
+            call.bytes(&[]);
+            call.bytes(&[]);
+            match self.device.transact(code, &call) {
+                Ok(reply) => {
+                    let mut read = Answer::new(reply.bytes());
+                    match read.status() {
+                        Ok(()) => match read.i32() {
+                            Ok(err) => said.push_str(&format!(" code{code}=answered(err {err})")),
+                            Err(e) => said.push_str(&format!(" code{code}=unreadable {e:#}")),
+                        },
+                        Err(e) => said.push_str(&format!(" code{code}=refused {e:#}")),
+                    }
+                }
+                Err(e) => said.push_str(&format!(" code{code}=failed {e:#}")),
+            }
+        }
+        said
     }
 
     /// Undo an AES-GCM encryption the service did with `key_blob`. The
