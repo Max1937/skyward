@@ -254,7 +254,13 @@ fn write_parameters(call: &mut Message, params: &[(u32, Value<'_>)]) {
         call.u32(*tag);
         match value {
             Value::Enum(v) | Value::Uint(v) => call.u32(*v),
-            Value::Bytes(b) => call.bytes(b),
+            // The arm that carries bytes is a run of bytes, which the far
+            // side reads on a boundary of eight: the four bytes the tag
+            // takes are followed by four of padding before it.
+            Value::Bytes(b) => {
+                call.pad_to(8);
+                call.bytes(b);
+            }
         }
     }
 }
