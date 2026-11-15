@@ -11,6 +11,7 @@ use crate::token::Token;
 use crate::user::Bound;
 use crate::weaver::Weaver;
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha512};
 use skyward_binder::driver::Binder;
 use skyward_block::dm::Target;
 use skyward_block::fsck::Checked;
@@ -18,10 +19,32 @@ use skyward_block::fstab::Entry;
 use skyward_block::{dm, mount};
 use std::path::{Path, PathBuf};
 
+/// Let a key into the filesystem, under the name the phone's own vold gives
+/// it. The older kind of policy names a key by an eight-byte descriptor
+/// computed from that key alone: the first eight bytes of the double SHA-512
+/// of its raw bytes (or of their first half, where the hardware keeps them
+/// wrapped). Every key therefore has a name of its own; using the name of
+/// one key for all of them leaves all but the first uninstalled. The newer
+/// kind lets the kernel work the name out and give it back.
+fn install_key(raw: &[u8], wrapped: bool) -> Result<[u8; crate::fscrypt::NAME_BYTES]> {
+    let naming = match naming()? {
+        crate::fscrypt::Naming::Descriptor(_) => {
+            let bytes = if wrapped { &raw[..raw.len() / 2] } else { raw };
+            let first = Sha512::digest(bytes);
+            let second = Sha512::digest(first);
+            let mut descriptor = [0u8; crate::fscrypt::DESCRIPTOR_BYTES];
+            descriptor.copy_from_slice(&second[..crate::fscrypt::DESCRIPTOR_BYTES]);
+            crate::fscrypt::Naming::Descriptor(descriptor)
+        }
+        crate::fscrypt::Naming::Identifier => crate::fscrypt::Naming::Identifier,
+    };
+    crate::fscrypt::add_key_named(Path::new(MOUNT), raw, wrapped, naming)
+}
+
 /// Say something where it can be read even from a recovery: the kernel's
 /// own log. The ordinary `println!` of this crate goes nowhere on a phone.
 #[cfg(target_os = "android")]
-fn tell(line: impl std::fmt::Display) {
+fn tell(line: String) {
     use std::io::Write;
     if let Ok(mut log) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
         let _ = writeln!(log, "skyward: data: {line}");
@@ -29,7 +52,16 @@ fn tell(line: impl std::fmt::Display) {
 }
 
 #[cfg(not(target_os = "android"))]
-fn tell(_: impl std::fmt::Display) {}
+fn tell(_: String) {}
+
+/// A step's outcome, written where it can be read after the recovery starts.
+fn trace(line: String) {
+    tell(line.clone());
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("/data/unencrypted/skyward-trace") {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
+    }
+}
 
 /// Where the data partition is mounted, and the name its decrypted form is
 /// given among the device-mapper's devices.
@@ -276,19 +308,19 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
     // lies: that is what a recovery is for, and what the phone's own
     // installer shows of the same partition.
     if let Err(e) = open_shared(service) {
-        tell(format_args!("could not open the key the data partition is wrapped in: {e:#}"));
+        trace(format!("could not open the key the data partition is wrapped in: {e:#}"));
         if !reads_as_it_lies() {
             return Err(e).context("open the key the data partition is wrapped in");
         }
     } else {
-        tell("the key the data partition is wrapped in is in");
+        trace("the key the data partition is wrapped in is in".to_string());
     }
     let mut closed = Vec::new();
     let mut owner = Note::default();
     let mut users = match open_users(service) {
         Ok(users) => users,
         Err(e) => {
-            tell(format_args!("could not open the keys of the users' own files: {e:#}"));
+            trace(format!("could not open the keys of the users' own files: {e:#}"));
             if !reads_as_it_lies() {
                 return Err(e).context("open the keys of the users' own files");
             }
@@ -303,12 +335,12 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
         }
     }
     users.sort_unstable();
-    tell(format_args!("users from de keys {users:?}, from ce keys {:?}", users_with_own_files()));
+    trace(format!("users from de keys {users:?}, from ce keys {:?}", users_with_own_files()));
     for user in users {
         let protector = match protector(user) {
             Ok(protector) => protector,
             Err(e) => {
-                tell(format_args!("user {user}'s own secret does not read: {e:#}"));
+                trace(format!("user {user}'s own secret does not read: {e:#}"));
                 if reads_as_it_lies() {
                     continue;
                 }
@@ -318,20 +350,20 @@ pub fn open_without_credential(service: &dyn KeyService) -> Result<Opening> {
         match protector.lock {
             None => match open_user_files(service, user, None, None) {
                 Ok(note) => {
-                    tell(format_args!("user {user}'s own files are open"));
+                    trace(format!("user {user}'s own files are open"));
                     if user == OWNER {
                         owner = note;
                     }
                 }
                 Err(e) => {
-                    tell(format_args!("user {user}'s own files did not open: {e:#}"));
+                    trace(format!("user {user}'s own files did not open: {e:#}"));
                     if !reads_as_it_lies() {
                         return Err(e);
                     }
                 }
             },
             Some(lock) => {
-                tell(format_args!("user {user} has a lock of kind {:?}", lock.kind));
+                trace(format!("user {user} has a lock of kind {:?}", lock.kind));
                 closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None });
             }
         }
@@ -518,7 +550,7 @@ fn open_shared(service: &dyn KeyService) -> Result<Option<[u8; crate::fscrypt::N
     };
     let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
     let raw = hardware_key(service, Path::new(SHARED_KEY), wrapped)?;
-    let name = crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming()?)?;
+    let name = install_key(&raw, wrapped)?;
     // The older kind of policy names a key by an eight-byte descriptor and
     // the newer by a sixteen-byte identifier. The phone writes down whichever
     // of the two it used, at that length; the kernel's answer begins with the
@@ -558,7 +590,7 @@ fn open_users(service: &dyn KeyService) -> Result<Vec<u32>> {
     for user in &users {
         let dir = Path::new(USER_KEYS).join("de").join(user.to_string());
         let raw = hardware_key(service, &dir, wrapped)?;
-        crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming()?)?;
+        install_key(&raw, wrapped)?;
     }
     Ok(users)
 }
@@ -784,7 +816,7 @@ fn open_user_files(service: &dyn KeyService, user: u32, credential: Option<&[u8]
     // Letting the key in names it the way the phone's own table names it:
     // the phones that encrypt each user's files the older way named a
     // descriptor for it, and the newer ones leave the name to the kernel.
-    crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming()?)?;
+    install_key(&raw, wrapped)?;
     if user == OWNER {
         show_owner_storage()?;
     }
