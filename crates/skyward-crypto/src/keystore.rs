@@ -98,15 +98,8 @@ impl StoredKey {
     /// What the wrapping is bound to: the directory's own hash and whatever
     /// secret guards it. A wrong secret gives a wrong binding, and the
     /// unwrapping fails rather than producing a key that looks usable.
-    ///
-    /// `SKYWARD_APP_ID=none` leaves the binding out, which is what a phone
-    /// that made the key without one expects; it is a way to ask the secure
-    /// world which of the two it wants, not something to leave in.
     fn app_id(&self, secret: &[u8]) -> Vec<u8> {
-        let mut id = match std::env::var("SKYWARD_APP_ID").as_deref() {
-            Ok("none") => Vec::new(),
-            _ => self.secdiscardable_hash.clone(),
-        };
+        let mut id = self.secdiscardable_hash.clone();
         id.extend_from_slice(secret);
         id
     }
@@ -128,18 +121,6 @@ impl StoredKey {
     pub fn authorizations(&self, service: &crate::keymint::KeyMint) -> Result<Vec<(i32, i64)>> {
         let blob = self.key_blob.as_ref().context("this key is wrapped by a secret, not by the key service")?;
         service.authorizations(blob, &self.app_id(&[]))
-    }
-
-    /// The key itself, opened by the value given rather than by the key
-    /// service: what a phone that keeps its key in software wraps it with.
-    /// The value is the whole of what the wrapping is bound to, not a secret
-    /// added to the directory's own binding.
-    pub fn unwrap_by(&self, pre_key: &[u8]) -> Result<Vec<u8>> {
-        if self.encrypted.len() < NONCE_BYTES + TAG_BYTES {
-            bail!("the wrapped key is {} bytes, too few to hold anything", self.encrypted.len());
-        }
-        let (nonce, body) = self.encrypted.split_at(NONCE_BYTES);
-        decrypt_with_secret(pre_key, nonce, body)
     }
 
     /// The key itself.
