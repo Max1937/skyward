@@ -18,7 +18,6 @@ use crate::token::Token;
 use anyhow::{bail, Context, Result};
 use skyward_binder::driver::{Binder, Handle};
 use skyward_binder::hidl::{self, Answer, Message, Parameter};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The hardware service, and the instance it serves as.
 pub const SERVICE: &str = "android.hardware.keymaster@3.0::IKeymasterDevice";
@@ -372,13 +371,10 @@ fn accepted(code: i32, what: &str) -> Result<()> {
     }
 }
 
-/// How many diagnostic dumps are still wanted. The partition is retried every
-/// few hundred milliseconds, and the phone's log has room for a handful.
-static DIAG: AtomicUsize = AtomicUsize::new(0);
-
-/// Whether to write one more diagnostic dump.
+/// Whether to write one more diagnostic dump. The parcels are written the
+/// way the older interface lists them, and are quiet once that is settled.
 fn diag_left() -> bool {
-    DIAG.fetch_add(1, Ordering::Relaxed) < 12
+    false
 }
 
 /// A run of bytes as hexadecimal, for a log that has no room for anything
