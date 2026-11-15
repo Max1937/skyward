@@ -97,6 +97,12 @@ impl Message {
         self.data[mark..mark + 4].copy_from_slice(&length.to_le_bytes());
     }
 
+    /// What has been written so far, for a log that shows how a call was put
+    /// together when the far side refuses it.
+    pub fn written(&self) -> &[u8] {
+        &self.data
+    }
+
     /// A single byte, written as it is. The binder steps over nothing after
     /// it: whatever comes next lands where this leaves off, so a run of bytes
     /// that makes up a structure's own fields is written one after another.
