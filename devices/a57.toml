@@ -156,6 +156,18 @@ ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
 user = "root"
 groups = ["root"]
 
+# The vibration motor. The A57's Qualcomm haptics driver is a timed output
+# under /sys/class/leds/vibrator, not a force-feedback input device: it is
+# driven by writing duration, brightness and activate. haptics.rs finds that
+# switch when no input device offers periodic force feedback and drives it
+# directly. Without this section the UI never opens the motor at all, so no
+# touch or key press ever vibrates. `resonance` is only read on phones whose
+# motor plays samples; the A57's timed output never opens it, but a config
+# still has to name an absolute file, so point it at the motor's own sysfs.
+[haptics]
+resonance = "/sys/class/leds/vibrator/max_brightness"
+strength = { lightest = 0.5, strongest = 1.0 }
+
 # The partitions a backup of the baseband and EFS takes. The sensors'
 # calibration is in persist.
 [backup]
