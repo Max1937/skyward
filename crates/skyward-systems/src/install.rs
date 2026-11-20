@@ -141,7 +141,14 @@ mod sys {
     pub fn metadata() -> Result<()> {
         let at = Path::new(METADATA);
         if !skyward_block::mount::is_mount_point(at)? {
-            skyward_block::mount::mount_ro(&by_name().join("metadata"), at)?;
+            // The phone may keep this partition under a name of its own, as
+            // the A57 keeps it as reserve2, so the table is asked first and
+            // the name a recovery expects is only the fallback.
+            let device = match skyward_block::fstab::device_at(METADATA) {
+                Ok(device) => std::path::PathBuf::from(device),
+                Err(_) => by_name().join("metadata"),
+            };
+            skyward_block::mount::mount_ro(&device, at)?;
         }
         Ok(())
     }
