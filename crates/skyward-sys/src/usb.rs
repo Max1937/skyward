@@ -40,10 +40,25 @@ pub fn set(config: &str, timeout: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Hand the port to `config` through "none", which stops the programs
-/// serving it and takes every function off; init then sets the port up
-/// once the programs behind the new configuration are ready.
+/// Hand the port to `config`. A port that is to serve adb, with or without
+/// file transfer beside it, is asked for directly: those functions share the
+/// port with what is already there, and taking it through "none" first stops
+/// adbd and unbinds the gadget, which on a phone whose init drives the older
+/// port path while the port is really a configfs gadget leaves it unbound
+/// with nothing to bring it back. Only a server that must have the port to
+/// itself is given it through "none", which stops the programs serving it and
+/// takes every function off; init then sets the port up once the programs
+/// behind the new configuration are ready.
 pub fn switch(config: &str, timeout: Duration) -> Result<()> {
-    set("none", timeout)?;
+    if takes_the_port_alone(config) {
+        set("none", timeout)?;
+    }
     set(config, timeout)
+}
+
+/// Whether the programs behind `config` need every function off the port
+/// before they take it: adb and file transfer do not, as each waits for the
+/// other's readiness flags and then binds beside it.
+fn takes_the_port_alone(config: &str) -> bool {
+    !matches!(config, "adb" | "mtp,adb" | "none")
 }
