@@ -211,23 +211,24 @@ struct Transfer {
 const MTP_FFS: &str = "/dev/usb-ffs/mtp";
 const MTP_FUNCTION: &str = "/config/usb_gadget/g1/functions/ffs.mtp";
 
-/// Make the MTP function ready: a functionfs where its endpoints are served
-/// and a function in the port's gadget for init to bind. The phone's own
-/// init makes neither on its recovery port, so they are made here before the
-/// service writes its descriptors. Both steps are idempotent: a functionfs
-/// already mounted is left alone, and a function that is already there is
-/// kept.
+/// Make the MTP function ready: a function in the port's gadget, and a
+/// functionfs where its endpoints are served. The kernel looks the function
+/// up by the name the functionfs is mounted with, so the function is made
+/// first; mounting before it exists answers "No such file or directory".
+/// The phone's own init makes neither on its recovery port. Both steps are
+/// idempotent: a function already there is kept, and a functionfs already
+/// mounted is left alone.
 fn open_mtp_function() -> Result<()> {
+    let function = Path::new(MTP_FUNCTION);
+    if !function.exists() {
+        std::fs::create_dir_all(function).with_context(|| format!("make {}", function.display()))?;
+    }
     let at = Path::new(MTP_FFS);
     std::fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
     if !mount::is_mount_point(at)? {
         let options = ["rmode=0770", "fmode=0660", "uid=0", "gid=0"].map(String::from);
         mount::mount(Path::new("mtp"), at, "functionfs", &options)
             .with_context(|| format!("mount a functionfs on {}", at.display()))?;
-    }
-    let function = Path::new(MTP_FUNCTION);
-    if !function.exists() {
-        std::fs::create_dir_all(function).with_context(|| format!("make {}", function.display()))?;
     }
     Ok(())
 }
