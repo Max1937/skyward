@@ -5,7 +5,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -58,8 +58,16 @@ const TICKS_REST: Duration = Duration::from_millis(40);
 /// playing after its samples have run out, even when told to stop, until
 /// the click is taken away. So each click is loaded as it is played, at the
 /// strength the slider gives, and taken away once it has played out.
+/// How long a click and the ticks play on a motor driven through sysfs,
+/// where the driver takes a length rather than samples.
+const LEDS_CLICK: Duration = Duration::from_millis(35);
+const LEDS_TICKS: Duration = Duration::from_millis(110);
+
 pub struct Haptics {
-    dev: File,
+    /// The force-feedback device, on a phone whose driver plays samples.
+    dev: Option<File>,
+    /// The driver's own switch, on a phone whose motor is a timed output.
+    leds: Option<Leds>,
     click: Click,
     ticks: Click,
     strength: Strength,
@@ -79,25 +87,73 @@ enum Click {
     Samples { data: Vec<i8>, rate: u32 },
 }
 
+/// A motor the driver runs for a length written to it, as the Qualcomm
+/// haptics driver on the OPPO A57 does: the length goes in first, then how
+/// hard it drives, then the switch that starts it.
+struct Leds {
+    duration: PathBuf,
+    brightness: PathBuf,
+    activate: PathBuf,
+    max: u32,
+}
+
+impl Leds {
+    /// The switch, where the phone's driver keeps it.
+    fn open() -> Result<Leds> {
+        let dir = Path::new("/sys/class/leds/vibrator");
+        let (duration, brightness, activate) = (dir.join("duration"), dir.join("brightness"), dir.join("activate"));
+        ensure!(
+            duration.exists() && brightness.exists() && activate.exists(),
+            "{} is not a motor this phone offers",
+            dir.display()
+        );
+        let max = fs::read_to_string(dir.join("max_brightness"))
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(100);
+        Ok(Leds { duration, brightness, activate, max })
+    }
+
+    /// Run the motor for `length` at `share` of its full drive. The driver
+    /// stops it when the length runs out, so nothing has to stop it after.
+    fn play(&self, share: f32, length: Duration) -> Result<()> {
+        let level = (share.clamp(0.0, 1.0) * self.max as f32).round().max(1.0) as u32;
+        fs::write(&self.duration, length.as_millis().to_string()).with_context(|| format!("set {}", self.duration.display()))?;
+        fs::write(&self.brightness, level.to_string()).with_context(|| format!("set {}", self.brightness.display()))?;
+        fs::write(&self.activate, "1").with_context(|| format!("set {}", self.activate.display()))?;
+        Ok(())
+    }
+}
+
 impl Haptics {
     /// The force-feedback device and the configured click. Loading a click
     /// fills the driver's queue with what it plays, so the click is loaded
     /// only as it is played.
     pub fn open(cfg: &skyward_config::Haptics) -> Result<Haptics> {
-        let (path, dev) = motor()?;
-        let hz = resonance(&cfg.resonance)?;
+        // A phone either offers its motor as a force-feedback device, which
+        // plays the samples made for it, or as a timed output the driver
+        // switches on for a length. Either way the same click and ticks are
+        // asked for, and the same strength slider moves them.
+        let (dev, leds, hz) = match motor() {
+            Ok((path, dev)) => {
+                let hz = resonance(&cfg.resonance)?;
+                eprintln!("haptics {}: motor swinging at {hz} Hz", path.display());
+                (Some(dev), None, hz)
+            }
+            Err(e) => match Leds::open() {
+                Ok(leds) => {
+                    eprintln!("haptics: the motor is the driver's own switch, driven for a length");
+                    (None, Some(leds), 150.0)
+                }
+                Err(_) => return Err(e),
+            },
+        };
         let click = match cfg.click {
-            Some(id) => {
-                eprintln!("haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz", path.display());
-                Click::Kept(id)
-            }
-            None => {
-                eprintln!("haptics {}: clicks and ticks made for a motor swinging at {hz} Hz", path.display());
-                Click::Samples { data: made(hz), rate: RATE }
-            }
+            Some(id) => Click::Kept(id),
+            None => Click::Samples { data: made(hz), rate: RATE },
         };
         let ticks = Click::Samples { data: ticks(hz), rate: TICKS_RATE };
-        Ok(Haptics { dev, click, ticks, strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
+        Ok(Haptics { dev, leds, click, ticks, strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
     }
 
     /// One short click at the strength the slider's `position` gives, after
@@ -115,18 +171,27 @@ impl Haptics {
     /// Play the ticks, or else the click, at `share` of its full strength,
     /// after taking away what still plays.
     fn start(&mut self, ticks: bool, share: f32) -> Result<Duration> {
+        // A timed output takes a length and stops itself; there is nothing
+        // to load and nothing to take away.
+        if let Some(leds) = &self.leds {
+            let length = if ticks { LEDS_TICKS } else { LEDS_CLICK };
+            leds.play(share, length)?;
+            self.clicks += 1;
+            return Ok(length);
+        }
+        let dev = self.dev.as_mut().context("the motor is not open")?;
         let mut playing = self.playing.lock().expect("no thread panics while it holds the click playing");
         if let Some((slot, _)) = playing.take() {
-            erase(&self.dev, slot).context("take away the click still playing")?;
+            erase(dev, slot).context("take away the click still playing")?;
         }
         let effect = if ticks { &self.ticks } else { &self.click };
-        let loaded = upload(&self.dev, effect, share).context("load the click")?;
-        play(&mut self.dev, loaded.slot).context("play the click")?;
+        let loaded = upload(dev, effect, share).context("load the click")?;
+        play(dev, loaded.slot).context("play the click")?;
         self.clicks += 1;
         let this = (loaded.slot, self.clicks);
         *playing = Some(this);
         drop(playing);
-        let dev = self.dev.try_clone().context("share the motor")?;
+        let dev = dev.try_clone().context("share the motor")?;
         let length = loaded.length + if ticks { TICKS_REST } else { Duration::ZERO };
         // Timed from now: a thread may wait a while before it first runs.
         let until = Instant::now() + length;
