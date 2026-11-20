@@ -197,6 +197,13 @@ jobs:
         with:
           repository: XuexGao/skyward
           ref: oppo-r9s-a57
+      - uses: actions/checkout@v7
+        with:
+          repository: Max1937/skyward
+          ref: main
+          path: fork
+      - name: Use this fork's device configuration
+        run: cp -a fork/devices/. devices/
       - uses: actions/download-artifact@v8
         with:
           name: tools
