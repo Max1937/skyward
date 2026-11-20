@@ -206,9 +206,35 @@ struct Transfer {
     zone: usize,
 }
 
+/// Where the MTP function's endpoints live, and the function the port's
+/// gadget binds when file transfer is on.
+const MTP_FFS: &str = "/dev/usb-ffs/mtp";
+const MTP_FUNCTION: &str = "/config/usb_gadget/g1/functions/ffs.mtp";
+
+/// Make the MTP function ready: a functionfs where its endpoints are served
+/// and a function in the port's gadget for init to bind. The phone's own
+/// init makes neither on its recovery port, so they are made here before the
+/// service writes its descriptors. Both steps are idempotent: a functionfs
+/// already mounted is left alone, and a function that is already there is
+/// kept.
+fn open_mtp_function() -> Result<()> {
+    let at = Path::new(MTP_FFS);
+    std::fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
+    if !mount::is_mount_point(at)? {
+        mount::mount(Path::new("mtp"), at, "functionfs", "rmode=0770,fmode=0660,uid=0,gid=0")
+            .with_context(|| format!("mount a functionfs on {}", at.display()))?;
+    }
+    let function = Path::new(MTP_FUNCTION);
+    if !function.exists() {
+        std::fs::create_dir_all(function).with_context(|| format!("make {}", function.display()))?;
+    }
+    Ok(())
+}
+
 impl Transfer {
     /// Serve file transfer; the port offers it from when it next rests.
     fn start(cfg: &DeviceConfig, info: &skyward_info::DeviceInfo, zone: usize) -> Result<Transfer> {
+        open_mtp_function()?;
         let device = skyward_mtp::Device {
             manufacturer: cfg.device.brand.clone(),
             model: info.model.clone(),
