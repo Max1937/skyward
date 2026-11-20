@@ -17,7 +17,7 @@ on:
     # which carries the same work.
     branches: ["main"]
     paths:
-      - ".github/workflows/upstream-oppo.yml"
+      - "docs/never"
   workflow_dispatch:
     inputs:
       device:
@@ -48,6 +48,11 @@ jobs:
         with:
           repository: XuexGao/skyward
           ref: oppo-r9s-a57
+      - uses: actions/checkout@v7
+        with:
+          path: overlay
+      - name: Take our changes over the tree
+        run: cp -a overlay/patches/. .
       - uses: ./.github/actions/setup
       - name: Build the recovery service for the phone
         run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
@@ -81,6 +86,11 @@ jobs:
         with:
           repository: XuexGao/skyward
           ref: oppo-r9s-a57
+      - uses: actions/checkout@v7
+        with:
+          path: overlay
+      - name: Take our changes over the tree
+        run: cp -a overlay/patches/. .
       - id: list
         env:
           DEVICE: ${{ inputs.device }}
@@ -115,9 +125,6 @@ jobs:
         with:
           swap-size-gb: 10
       - uses: actions/checkout@v7
-        with:
-          repository: XuexGao/skyward
-          ref: oppo-r9s-a57
         with:
           repository: ${{ env.KERNEL_REPOSITORY }}
           ref: ${{ env.KERNEL_REF }}
@@ -199,11 +206,9 @@ jobs:
           ref: oppo-r9s-a57
       - uses: actions/checkout@v7
         with:
-          repository: Max1937/skyward
-          ref: main
-          path: fork
-      - name: Use this fork's device configuration
-        run: cp -a fork/devices/. devices/
+          path: overlay
+      - name: Take our changes over the tree
+        run: cp -a overlay/patches/. .
       - uses: actions/download-artifact@v8
         with:
           name: tools
