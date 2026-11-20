@@ -86,13 +86,19 @@ pub fn bind_file_transfer(on: bool, timeout: Duration) -> Result<()> {
     let wanted = if on { "mtp,adb" } else { "adb" };
     // Take the port down: its functions are read again when it binds.
     fs::write(&udc, "").with_context(|| format!("take the port down through {udc}"))?;
-    // File transfer takes the second function, adb the first.
+    // The interfaces come in the order they are put in the configuration, and
+    // the port's product id says which is which: the computer's own driver
+    // for this product takes the second interface for adb, so file transfer
+    // takes the first.
+    let _ = fs::remove_file(format!("{config}/f1"));
     let _ = fs::remove_file(format!("{config}/f2"));
     if on {
-        std::os::unix::fs::symlink(format!("{GADGET}/functions/ffs.mtp"), format!("{config}/f2"))
+        std::os::unix::fs::symlink(format!("{GADGET}/functions/ffs.mtp"), format!("{config}/f1"))
             .with_context(|| "put the file transfer function in the port")?;
+        let _ = std::os::unix::fs::symlink(format!("{GADGET}/functions/ffs.adb"), format!("{config}/f2"));
+    } else {
+        let _ = std::os::unix::fs::symlink(format!("{GADGET}/functions/ffs.adb"), format!("{config}/f1"));
     }
-    let _ = std::os::unix::fs::symlink(format!("{GADGET}/functions/ffs.adb"), format!("{config}/f1"));
     // The product the port names itself by tells the computer what it offers:
     // the recovery's own id with adb alone, and the file transfer id with it.
     let product = if on {
