@@ -221,7 +221,8 @@ fn open_mtp_function() -> Result<()> {
     let at = Path::new(MTP_FFS);
     std::fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
     if !mount::is_mount_point(at)? {
-        mount::mount(Path::new("mtp"), at, "functionfs", "rmode=0770,fmode=0660,uid=0,gid=0")
+        let options = ["rmode=0770", "fmode=0660", "uid=0", "gid=0"].map(String::from);
+        mount::mount(Path::new("mtp"), at, "functionfs", &options)
             .with_context(|| format!("mount a functionfs on {}", at.display()))?;
     }
     let function = Path::new(MTP_FUNCTION);
