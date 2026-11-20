@@ -247,6 +247,9 @@ impl Transfer {
         };
         let service = skyward_mtp::Service::start(device, skyward_ui::fmt::rules(zone).clone())?;
         skyward_sys::usb::set_mtp(true);
+        // The computer only learns of the second function when the port binds,
+        // so the port is bound again now that its endpoints are served.
+        skyward_sys::usb::bind_file_transfer(true, USB_TIMEOUT)?;
         Ok(Transfer { service, offered: false, zone })
     }
 
@@ -265,10 +268,10 @@ impl Transfer {
 
     /// Stop serving: a port at rest goes back to adb alone first.
     fn stop(self, rests: bool) -> Result<()> {
+        let unbound = if rests { skyward_sys::usb::bind_file_transfer(false, USB_TIMEOUT) } else { Ok(()) };
         skyward_sys::usb::set_mtp(false);
-        let switched = if rests { skyward_sys::usb::switch("adb", USB_TIMEOUT) } else { Ok(()) };
         let stopped = self.service.stop();
-        switched.and(stopped)
+        unbound.and(stopped)
     }
 }
 
