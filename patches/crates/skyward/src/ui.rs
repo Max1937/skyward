@@ -217,7 +217,17 @@ const NORMAL_MAX: [(&str, &str); 3] = [
 /// display driver booted with gives that maximum in the device tree.
 fn normal_max(max: u32) -> Result<u32> {
     let param = "/sys/module/msm_drm/parameters/dsi_display0";
-    let boot = fs::read_to_string(param).with_context(|| format!("read {param}"))?;
+    // Not every panel driver names the panel it booted with here: some older
+    // phones have no such parameter at all. Their whole backlight range is
+    // the normal maximum, so take it rather than stopping before the first
+    // frame is drawn.
+    let boot = match fs::read_to_string(param) {
+        Ok(boot) => boot,
+        Err(e) => {
+            skyward_sys::kmsg(&format!("no panel name at {param}: {e}; the backlight's whole range is its normal maximum"))?;
+            return Ok(max);
+        }
+    };
     // The panel's node, then its configuration after a colon, as in
     // "qcom,mdss_dsi_m1_42_02_0a_dsc_cmd:"; the driver takes no name
     // without the colon either.
