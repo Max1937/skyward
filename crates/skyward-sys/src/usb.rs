@@ -3,10 +3,15 @@
 //! beside it while file transfer is on.
 
 use crate::{prop, set_prop, wait_prop};
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// The port's gadget: the functions it offers, the description it carries to
+/// the computer, and the controller it is bound to.
+const GADGET: &str = "/config/usb_gadget/g1";
 
 static MTP: AtomicBool = AtomicBool::new(false);
 
@@ -61,4 +66,75 @@ pub fn switch(config: &str, timeout: Duration) -> Result<()> {
 /// other's readiness flags and then binds beside it.
 fn takes_the_port_alone(config: &str) -> bool {
     !matches!(config, "adb" | "mtp,adb" | "none")
+}
+
+/// Bind the port so that it offers file transfer beside adb, or, with `on`
+/// false, so that it offers adb alone again.
+///
+/// The kernel reads a gadget's functions and the description it carries only
+/// when the port binds, so a function added to or taken off the configuration
+/// while the port is up is never seen by the computer: the port has to be
+/// taken down and bound again. adb's own descriptors go with the port, so
+/// adbd is stopped and started again to write them afresh. If the port is
+/// left down by anything here, a waiting thread binds it again so that adb
+/// comes back on its own.
+pub fn bind_file_transfer(on: bool, timeout: Duration) -> Result<()> {
+    let udc = format!("{GADGET}/UDC");
+    let controller = fs::read_to_string(&udc).with_context(|| format!("read {udc}"))?.trim().to_string();
+    ensure!(!controller.is_empty() && controller != "none", "the port is not bound to a controller");
+    let config = format!("{GADGET}/configs/b.1");
+    let wanted = if on { "mtp,adb" } else { "adb" };
+    // Take the port down: its functions are read again when it binds.
+    fs::write(&udc, "").with_context(|| format!("take the port down through {udc}"))?;
+    // File transfer takes the second function, adb the first.
+    let _ = fs::remove_file(format!("{config}/f2"));
+    if on {
+        std::os::unix::fs::symlink(format!("{GADGET}/functions/ffs.mtp"), format!("{config}/f2"))
+            .with_context(|| "put the file transfer function in the port")?;
+    }
+    let _ = std::os::unix::fs::symlink(format!("{GADGET}/functions/ffs.adb"), format!("{config}/f1"));
+    // The product the port names itself by tells the computer what it offers:
+    // the recovery's own id with adb alone, and the file transfer id with it.
+    let product = if on {
+        "0x4EE2".to_string()
+    } else {
+        let adb = prop("ro.recovery.usb.adb.pid").unwrap_or_default();
+        let adb = adb.trim().trim_start_matches("0x").trim_start_matches("0X");
+        if adb.is_empty() { "0xD001".to_string() } else { format!("0x{adb}") }
+    };
+    fs::write(format!("{GADGET}/idProduct"), &product).with_context(|| format!("name the port in {GADGET}"))?;
+    // adbd writes adb's descriptors as it starts, so it is started again now
+    // that the port is to offer what it should.
+    set_prop("ctl.stop", "adbd")?;
+    let stopped = Instant::now();
+    while prop("init.svc.adbd").as_deref() == Some("running") {
+        ensure!(stopped.elapsed() < timeout, "adbd does not stop");
+        thread::sleep(Duration::from_millis(20));
+    }
+    set_prop("ctl.start", "adbd")?;
+    // If the port is still down after a while, bind it anyway: whatever went
+    // wrong, adb is not left off the port.
+    {
+        let (udc, controller) = (udc.clone(), controller.clone());
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(15));
+            let down = fs::read_to_string(&udc).map(|text| text.trim().is_empty()).unwrap_or(false);
+            if down {
+                let _ = fs::write(&udc, controller);
+            }
+        });
+    }
+    // init binds the port once adbd has written its descriptors.
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if fs::read_to_string(&udc).map(|text| !text.trim().is_empty()).unwrap_or(false) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    // The port is up; say what it offers, so that what waits on the state
+    // sees it.
+    set_prop("sys.usb.config", wanted)?;
+    set_prop("sys.usb.state", wanted)?;
+    Ok(())
 }
