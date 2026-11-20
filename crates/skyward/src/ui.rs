@@ -856,6 +856,50 @@ fn clock(zone: usize) -> Result<String> {
 /// Tell the kernel log how the data partition was mounted, where opening
 /// it mounted it: the check made first, in full where it found something,
 /// and the device it is read through.
+/// Where the phone's own card is shown: a folder of internal storage, which
+/// is the one tree the file manager and file transfer both serve, so the card
+/// is read, written and installed from there as any other folder is.
+const CARD: &str = "/sdcard/sdcard1";
+
+/// Mount the phone's removable card under internal storage. A phone without
+/// one, or with one this kernel cannot read, stays with internal storage
+/// alone: why the card did not go in goes to the kernel log and nowhere else.
+fn mount_card() -> Result<()> {
+    let at = Path::new(CARD);
+    if !Path::new(skyward_crypto::data::SDCARD).is_dir() {
+        return Ok(());
+    }
+    if mount::is_mount_point(at)? {
+        return Ok(());
+    }
+    std::fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
+    for device in ["/dev/block/mmcblk1p1", "/dev/block/mmcblk1"] {
+        let device = Path::new(device);
+        if !device.exists() {
+            continue;
+        }
+        for filesystem in ["vfat", "exfat", "ext4", "f2fs"] {
+            // The card's names are the owner's own, so they are read as UTF-8
+            // rather than through a code page; the filesystems that keep no
+            // names of their own take no such option.
+            let options: Vec<String> = match filesystem {
+                "vfat" | "exfat" => ["rw", "noatime", "iocharset=utf8"].map(String::from).to_vec(),
+                _ => ["rw", "noatime"].map(String::from).to_vec(),
+            };
+            match mount::mount(device, at, filesystem, &options) {
+                Ok(()) => {
+                    skyward_sys::kmsg(&format!("the phone's card is shown at {CARD} as {filesystem}"))?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    skyward_sys::kmsg(&format!("the card at {} did not go in as {filesystem}: {e:#}", device.display()))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn log_mounted(mounted: &Opened) -> Result<()> {
     if let Some(checked) = &mounted.checked {
         skyward_sys::kmsg(&format!("the check of {} ended with {}", mounted.mapped.display(), checked.status))?;
@@ -2087,6 +2131,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 decrypt::Ended::Opened(Ok(opening)) => {
                     if let Some(mounted) = &opening.mounted {
                         log_mounted(mounted)?;
+                    }
+                    // The card is shown inside internal storage, which is open
+                    // from here on.
+                    if let Err(e) = mount_card() {
+                        skyward_sys::kmsg(&format!("the phone's card was not shown: {e:#}"))?;
                     }
                     closed = opening.closed;
                     show_closed(&mut app, &closed)?;
