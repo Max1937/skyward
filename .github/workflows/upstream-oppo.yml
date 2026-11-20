@@ -116,9 +116,6 @@ jobs:
           swap-size-gb: 10
       - uses: actions/checkout@v7
         with:
-          repository: XuexGao/skyward
-          ref: oppo-r9s-a57
-        with:
           repository: ${{ env.KERNEL_REPOSITORY }}
           ref: ${{ env.KERNEL_REF }}
           path: kernel
